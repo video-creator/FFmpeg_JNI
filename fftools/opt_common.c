@@ -21,7 +21,7 @@
 #include "config.h"
 
 #include <stdio.h>
-
+#include "ffmpeg.h"
 #include "cmdutils.h"
 #include "fopen_utf8.h"
 #include "opt_common.h"
@@ -232,10 +232,10 @@ static void print_buildconf(int flags, int level)
     }
 }
 
-void show_banner(int argc, char **argv, const OptionDef *options)
+void show_banner(int argc, char **argv, const OptionDef *options, FFGlobalParam *global_param)
 {
     int idx = locate_option(argc, argv, options, "version");
-    if (hide_banner || idx)
+    if (global_param->hide_banner || idx)
         return;
 
     print_program_info (INDENT|SHOW_COPYRIGHT, AV_LOG_INFO);

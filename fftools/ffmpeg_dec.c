@@ -102,6 +102,8 @@ typedef struct DecoderPriv {
         AVDictionary       *opts;
         const AVCodec      *codec;
     } standalone_init;
+
+    FFGlobalParam *global_param;
 } DecoderPriv;
 
 static DecoderPriv *dp_from_dec(Decoder *d)
@@ -417,7 +419,7 @@ static int video_frame_process(DecoderPriv *dp, AVFrame *frame,
     dp->last_frame_pts          = frame->pts;
     dp->last_frame_tb           = frame->time_base;
 
-    if (debug_ts) {
+    if (dp->global_param->debug_ts) {
         av_log(dp, AV_LOG_INFO,
                "decoder -> pts:%s pts_time:%s "
                "pkt_dts:%s pkt_dts_time:%s "
@@ -670,7 +672,7 @@ static int transcode_subtitles(DecoderPriv *dp, const AVPacket *pkt,
         av_log(dp, AV_LOG_ERROR, "Error decoding subtitles: %s\n",
                av_err2str(ret));
         dp->dec.decode_errors++;
-        return exit_on_error ? ret : 0;
+        return dp->global_param->exit_on_error ? ret : 0;
     }
 
     if (!got_output)
@@ -737,7 +739,7 @@ static int packet_decode(DecoderPriv *dp, AVPacket *pkt, AVFrame *frame)
             return ret;
 
         dp->dec.decode_errors++;
-        if (exit_on_error)
+        if (dp->global_param->exit_on_error)
             return ret;
     }
 
@@ -750,9 +752,9 @@ static int packet_decode(DecoderPriv *dp, AVPacket *pkt, AVFrame *frame)
 
         av_frame_unref(frame);
 
-        update_benchmark(NULL);
+        update_benchmark(dp->global_param, NULL);
         ret = avcodec_receive_frame_flags(dec, frame, flags);
-        update_benchmark("decode_%s %s", type_desc, dp->parent_name);
+        update_benchmark(dp->global_param,"decode_%s %s", type_desc, dp->parent_name);
 
         if (ret == AVERROR(EAGAIN)) {
             av_assert0(pkt); // should never happen during flushing
@@ -763,16 +765,16 @@ static int packet_decode(DecoderPriv *dp, AVPacket *pkt, AVFrame *frame)
             av_log(dp, AV_LOG_ERROR, "Decoding error: %s\n", av_err2str(ret));
             dp->dec.decode_errors++;
 
-            if (exit_on_error)
+            if (dp->global_param->exit_on_error)
                 return ret;
 
             continue;
         }
 
         if (frame->decode_error_flags || (frame->flags & AV_FRAME_FLAG_CORRUPT)) {
-            av_log(dp, exit_on_error ? AV_LOG_FATAL : AV_LOG_WARNING,
+            av_log(dp, dp->global_param->exit_on_error ? AV_LOG_FATAL : AV_LOG_WARNING,
                    "corrupt decoded frame\n");
-            if (exit_on_error)
+            if (dp->global_param->exit_on_error)
                 return AVERROR_INVALIDDATA;
         }
 
@@ -1011,9 +1013,9 @@ static int decoder_thread(void *arg)
 
         err_rate = (dp->dec.frames_decoded || dp->dec.decode_errors) ?
                    (float)dp->dec.decode_errors / (dp->dec.frames_decoded + dp->dec.decode_errors) : 0.f;
-        if (err_rate > max_error_rate) {
+        if (err_rate > dp->global_param->max_error_rate) {
             av_log(dp, AV_LOG_FATAL, "Decode error rate %g exceeds maximum %g\n",
-                   err_rate, max_error_rate);
+                   err_rate, dp->global_param->max_error_rate);
             ret = FFMPEG_ERROR_RATE_EXCEEDED;
         } else if (err_rate)
             av_log(dp, AV_LOG_VERBOSE, "Decode error rate %g\n", err_rate);
@@ -1183,12 +1185,12 @@ static int multiview_setup(DecoderPriv *dp, AVCodecContext *dec_ctx)
         switch (vs->type) {
         case VIEW_SPECIFIER_TYPE_IDX:
             if (vs->val >= nb_view_ids_av) {
-                av_log(dp, exit_on_error ? AV_LOG_ERROR : AV_LOG_WARNING,
+                av_log(dp, dp->global_param->exit_on_error ? AV_LOG_ERROR : AV_LOG_WARNING,
                        "View with index %u requested, but only %u views available "
                        "in current video sequence (more views may or may not be "
                        "available in later sequences).\n",
                        vs->val, nb_view_ids_av);
-                if (exit_on_error) {
+                if (dp->global_param->exit_on_error) {
                     ret = AVERROR(EINVAL);
                     goto fail;
                 }
@@ -1209,10 +1211,10 @@ static int multiview_setup(DecoderPriv *dp, AVCodecContext *dec_ctx)
                 }
             }
             if (view_idx < 0) {
-                av_log(dp, exit_on_error ? AV_LOG_ERROR : AV_LOG_WARNING,
+                av_log(dp, dp->global_param->exit_on_error ? AV_LOG_ERROR : AV_LOG_WARNING,
                        "View with ID %u requested, but is not available "
                        "in the video sequence\n", vs->val);
-                if (exit_on_error) {
+                if (dp->global_param->exit_on_error) {
                     ret = AVERROR(EINVAL);
                     goto fail;
                 }
@@ -1234,10 +1236,10 @@ static int multiview_setup(DecoderPriv *dp, AVCodecContext *dec_ctx)
                 }
             }
             if (view_idx < 0) {
-                av_log(dp, exit_on_error ? AV_LOG_ERROR : AV_LOG_WARNING,
+                av_log(dp, dp->global_param->exit_on_error ? AV_LOG_ERROR : AV_LOG_WARNING,
                        "View position '%s' requested, but is not available "
                        "in the video sequence\n", av_stereo3d_view_name(vs->val));
-                if (exit_on_error) {
+                if (dp->global_param->exit_on_error) {
                     ret = AVERROR(EINVAL);
                     goto fail;
                 }
@@ -1377,7 +1379,7 @@ static int get_buffer(AVCodecContext *dec_ctx, AVFrame *frame, int flags)
     return avcodec_default_get_buffer2(dec_ctx, frame, flags);
 }
 
-static HWDevice *hw_device_match_by_codec(const AVCodec *codec)
+static HWDevice *hw_device_match_by_codec(const AVCodec *codec, FFGlobalParam *global_param)
 {
     const AVCodecHWConfig *config;
     HWDevice *dev;
@@ -1387,7 +1389,7 @@ static HWDevice *hw_device_match_by_codec(const AVCodec *codec)
             return NULL;
         if (!(config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
             continue;
-        dev = hw_device_get_by_type(config->device_type);
+        dev = hw_device_get_by_type(config->device_type, global_param);
         if (dev)
             return dev;
     }
@@ -1403,14 +1405,14 @@ static int hw_device_setup_for_decode(DecoderPriv *dp,
     int err, auto_device = 0;
 
     if (hwaccel_device) {
-        dev = hw_device_get_by_name(hwaccel_device);
+        dev = hw_device_get_by_name(hwaccel_device, dp->global_param);
         if (!dev) {
             if (dp->hwaccel_id == HWACCEL_AUTO) {
                 auto_device = 1;
             } else if (dp->hwaccel_id == HWACCEL_GENERIC) {
                 type = dp->hwaccel_device_type;
                 err = hw_device_init_from_type(type, hwaccel_device,
-                                               &dev);
+                                               &dev, dp->global_param);
             } else {
                 // This will be dealt with by API-specific initialisation
                 // (using hwaccel_device), so nothing further needed here.
@@ -1433,7 +1435,7 @@ static int hw_device_setup_for_decode(DecoderPriv *dp,
             auto_device = 1;
         } else if (dp->hwaccel_id == HWACCEL_GENERIC) {
             type = dp->hwaccel_device_type;
-            dev = hw_device_get_by_type(type);
+            dev = hw_device_get_by_type(type, dp->global_param);
 
             // When "-qsv_device device" is used, an internal QSV device named
             // as "__qsv_device" is created. Another QSV device is created too
@@ -1444,12 +1446,12 @@ static int hw_device_setup_for_decode(DecoderPriv *dp,
             // call hw_device_get_by_name("__qsv_device") to select the internal QSV
             // device.
             if (!dev && type == AV_HWDEVICE_TYPE_QSV)
-                dev = hw_device_get_by_name("__qsv_device");
+                dev = hw_device_get_by_name("__qsv_device", dp->global_param);
 
             if (!dev)
-                err = hw_device_init_from_type(type, NULL, &dev);
+                err = hw_device_init_from_type(type, NULL, &dev, dp->global_param);
         } else {
-            dev = hw_device_match_by_codec(codec);
+            dev = hw_device_match_by_codec(codec, dp->global_param);
             if (!dev) {
                 // No device for this codec, but not using generic hwaccel
                 // and therefore may well not need one - ignore.
@@ -1468,7 +1470,7 @@ static int hw_device_setup_for_decode(DecoderPriv *dp,
             if (!config)
                 break;
             type = config->device_type;
-            dev = hw_device_get_by_type(type);
+            dev = hw_device_get_by_type(type, dp->global_param);
             if (dev) {
                 av_log(dp, AV_LOG_INFO, "Using auto "
                        "hwaccel type %s with existing device %s.\n",
@@ -1482,7 +1484,7 @@ static int hw_device_setup_for_decode(DecoderPriv *dp,
             type = config->device_type;
             // Try to make a new device of this type.
             err = hw_device_init_from_type(type, hwaccel_device,
-                                           &dev);
+                                           &dev, dp->global_param);
             if (err < 0) {
                 // Can't make a device of this type.
                 continue;
@@ -1655,7 +1657,7 @@ static int dec_open(DecoderPriv *dp, AVDictionary **dec_opts,
 
 int dec_init(Decoder **pdec, Scheduler *sch,
              AVDictionary **dec_opts, const DecoderOpts *o,
-             AVFrame *param_out)
+             AVFrame *param_out, FFGlobalParam *global_param)
 {
     DecoderPriv *dp;
     int ret;
@@ -1667,7 +1669,7 @@ int dec_init(Decoder **pdec, Scheduler *sch,
         return ret;
 
     multiview_check_manual(dp, *dec_opts);
-
+    dp->global_param = global_param;
     ret = dec_open(dp, dec_opts, o, param_out);
     if (ret < 0)
         goto fail;
@@ -1695,23 +1697,23 @@ int dec_create(const OptionsContext *o, const char *arg, Scheduler *sch)
     ret = dec_alloc(&dp, sch, 0);
     if (ret < 0)
         return ret;
+    dp->global_param = o->global_param;
+    dp->index = o->global_param->nb_decoders;
 
-    dp->index = nb_decoders;
-
-    ret = GROW_ARRAY(decoders, nb_decoders);
+    ret = GROW_ARRAY(o->global_param->decoders, o->global_param->nb_decoders);
     if (ret < 0) {
         dec_free((Decoder **)&dp);
         return ret;
     }
 
-    decoders[nb_decoders - 1] = (Decoder *)dp;
+    o->global_param->decoders[o->global_param->nb_decoders - 1] = (Decoder *)dp;
 
     of_index = strtol(arg, &p, 0);
-    if (of_index < 0 || of_index >= nb_output_files) {
+    if (of_index < 0 || of_index >= o->global_param->nb_output_files) {
         av_log(dp, AV_LOG_ERROR, "Invalid output file index '%d' in %s\n", of_index, arg);
         return AVERROR(EINVAL);
     }
-    of = output_files[of_index];
+    of = o->global_param->output_files[of_index];
 
     ost_index = strtol(p + 1, NULL, 0);
     if (ost_index < 0 || ost_index >= of->nb_streams) {

@@ -31,6 +31,7 @@
 #include "fftools/ffmpeg.h"
 #include "fftools/ffmpeg_mux.h"
 
+#include "libavutil/mem.h"
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/pixdesc.h"
@@ -862,7 +863,7 @@ static void uninit_graphprint(GraphPrintContext *gpc)
     av_freep(&gpc);
 }
 
-static int init_graphprint(GraphPrintContext **pgpc, AVBPrint *target_buf)
+static int init_graphprint(GraphPrintContext **pgpc, AVBPrint *target_buf, FFGlobalParam *global_param)
 {
     const AVTextFormatter *text_formatter;
     AVTextFormatContext *tfc = NULL;
@@ -874,7 +875,7 @@ static int init_graphprint(GraphPrintContext **pgpc, AVBPrint *target_buf)
 
     av_bprint_init(target_buf, 0, AV_BPRINT_SIZE_UNLIMITED);
 
-    const char *w_name = print_graphs_format ? print_graphs_format : "json";
+    const char *w_name = global_param->print_graphs_format ? global_param->print_graphs_format : "json";
 
     text_formatter = avtext_get_formatter_by_name(w_name);
     if (!text_formatter) {
@@ -891,7 +892,7 @@ static int init_graphprint(GraphPrintContext **pgpc, AVBPrint *target_buf)
     }
 
     AVTextFormatOptions tf_options = { .show_optional_fields = -1 };
-    const char *w_args = print_graphs_format ? strchr(print_graphs_format, '=') : NULL;
+    const char *w_args = global_param->print_graphs_format ? strchr(global_param->print_graphs_format, '=') : NULL;
     if (w_args)
         ++w_args; // consume '='
     ret = avtext_context_open(&tfc, text_formatter, wctx, w_args, sections, FF_ARRAY_ELEMS(sections), tf_options, NULL);
@@ -944,7 +945,7 @@ fail:
 }
 
 
-int print_filtergraph(FilterGraph *fg, AVFilterGraph *graph)
+int print_filtergraph(FilterGraph *fg, AVFilterGraph *graph, FFGlobalParam *global_param)
 {
     av_assert2(fg);
 
@@ -956,7 +957,7 @@ int print_filtergraph(FilterGraph *fg, AVFilterGraph *graph)
     if (target_buf->len)
         av_bprint_finalize(target_buf, NULL);
 
-    ret = init_graphprint(&gpc, target_buf);
+    ret = init_graphprint(&gpc, target_buf, global_param);
     if (ret)
         return ret;
 
@@ -985,14 +986,14 @@ int print_filtergraph(FilterGraph *fg, AVFilterGraph *graph)
     return 0;
 }
 
-static int print_filtergraphs_priv(FilterGraph **graphs, int nb_graphs, InputFile **ifiles, int nb_ifiles, OutputFile **ofiles, int nb_ofiles)
+static int print_filtergraphs_priv(FilterGraph **graphs, int nb_graphs, InputFile **ifiles, int nb_ifiles, OutputFile **ofiles, int nb_ofiles, FFGlobalParam *global_param)
 {
     GraphPrintContext *gpc = NULL;
     AVTextFormatContext *tfc;
     AVBPrint target_buf;
     int ret;
 
-    ret = init_graphprint(&gpc, &target_buf);
+    ret = init_graphprint(&gpc, &target_buf, global_param);
     if (ret)
         goto cleanup;
 
@@ -1037,15 +1038,15 @@ static int print_filtergraphs_priv(FilterGraph **graphs, int nb_graphs, InputFil
 
     avtext_print_section_footer(tfc); // SECTION_ID_ROOT
 
-    if (print_graphs_file) {
+    if (global_param->print_graphs_file) {
         AVIOContext *avio = NULL;
 
-        if (!strcmp(print_graphs_file, "-")) {
+        if (!strcmp(global_param->print_graphs_file, "-")) {
             printf("%s", target_buf.str);
         } else {
-            ret = avio_open2(&avio, print_graphs_file, AVIO_FLAG_WRITE, NULL, NULL);
+            ret = avio_open2(&avio, global_param->print_graphs_file, AVIO_FLAG_WRITE, NULL, NULL);
             if (ret < 0) {
-                av_log(NULL, AV_LOG_ERROR, "Failed to open graph output file, \"%s\": %s\n", print_graphs_file, av_err2str(ret));
+                av_log(NULL, AV_LOG_ERROR, "Failed to open graph output file, \"%s\": %s\n", global_param->print_graphs_file, av_err2str(ret));
                 goto cleanup;
             }
 
@@ -1056,7 +1057,7 @@ static int print_filtergraphs_priv(FilterGraph **graphs, int nb_graphs, InputFil
         }
     }
 
-    if (print_graphs)
+    if (global_param->print_graphs)
         av_log(NULL, AV_LOG_INFO, "%s    %c", target_buf.str, '\n');
 
 cleanup:
@@ -1070,9 +1071,9 @@ cleanup:
     return ret;
 }
 
-int print_filtergraphs(FilterGraph **graphs, int nb_graphs, InputFile **ifiles, int nb_ifiles, OutputFile **ofiles, int nb_ofiles)
+int print_filtergraphs(FilterGraph **graphs, int nb_graphs, InputFile **ifiles, int nb_ifiles, OutputFile **ofiles, int nb_ofiles, FFGlobalParam *global_param)
 {
-    int ret = print_filtergraphs_priv(graphs, nb_graphs, ifiles, nb_ifiles, ofiles, nb_ofiles);
+    int ret = print_filtergraphs_priv(graphs, nb_graphs, ifiles, nb_ifiles, ofiles, nb_ofiles,global_param);
     ff_resman_uninit();
     return ret;
 }

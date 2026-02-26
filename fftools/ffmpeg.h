@@ -258,6 +258,72 @@ typedef struct OptionsContext {
     SpecifierOptList enc_stats_pre_fmt;
     SpecifierOptList enc_stats_post_fmt;
     SpecifierOptList mux_stats_fmt;
+    struct FFGlobalParam *global_param;
+
+
+
+//     HWDevice* filter_hw_device;
+
+//     char* vstats_filename;
+
+//     float dts_delta_threshold;
+//     float dts_error_threshold;
+
+// #if FFMPEG_OPT_VSYNC
+//     enum VideoSyncMethod video_sync_method;
+// #endif
+//     float frame_drop_threshold;
+//     int do_benchmark;
+//     int do_benchmark_all;
+//     int do_hex_dump;
+//     int do_pkt_dump;
+//     int copy_ts;
+//     int start_at_zero;
+//     int copy_tb;
+//     int debug_ts;
+//     int exit_on_error;
+//     int abort_on_flags;
+//     int print_stats;
+//     int stdin_interaction;
+//     float max_error_rate;
+//     char* filter_nbthreads;
+//     int filter_complex_nbthreads;
+//     int filter_buffered_frames;
+//     int vstats_version;
+//     int print_graphs;
+//     char* print_graphs_file;
+//     char* print_graphs_format;
+//     int auto_conversion_filters;
+//     int64_t stats_period;
+
+    int file_overwrite;
+    int no_file_overwrite;
+    int ignore_unknown_streams;
+    int copy_unknown_streams;
+    int recast_media;
+    int hide_banner;
+    int do_benchmark;
+    int do_benchmark_all;
+    int do_hex_dump;
+    int do_pkt_dump;
+    int stdin_interaction;
+    int frame_drop_threshold;
+    int copy_ts;
+    int start_at_zero;
+    int copy_tb;
+    int debug_ts;
+    float dts_delta_threshold;
+    float dts_error_threshold;
+    int exit_on_error;
+    int filter_buffered_frames;
+    int filter_complex_nbthreads;
+    int print_graphs;
+    char *print_graphs_file;
+    char *print_graphs_format;
+    int auto_conversion_filters;
+    int print_stats;
+    float max_error_rate;
+    int vstats_version;
 } OptionsContext;
 
 enum IFilterFlags {
@@ -508,6 +574,7 @@ typedef struct InputStream {
      * currently video and audio only */
     InputFilter         **filters;
     int                nb_filters;
+    FFGlobalParam *global_param;
 } InputStream;
 
 typedef struct InputStreamGroup {
@@ -633,6 +700,7 @@ typedef struct Encoder {
     // number of frames/samples sent to the encoder
     uint64_t                frames_encoded;
     uint64_t                samples_encoded;
+    struct FFGlobalParam *global_param;
 } Encoder;
 
 enum CroppingType {
@@ -739,68 +807,154 @@ typedef struct FrameData {
     AVFrameSideData   **side_data;
     int                 nb_side_data;
 } FrameData;
+typedef struct BenchmarkTimeStamps {
+    int64_t real_usec;
+    int64_t user_usec;
+    int64_t sys_usec;
+} BenchmarkTimeStamps;
 
-extern InputFile   **input_files;
-extern int        nb_input_files;
+// extern InputFile   **input_files;
+// extern int        nb_input_files;
 
-extern OutputFile   **output_files;
-extern int         nb_output_files;
+// extern OutputFile   **output_files;
+// extern int         nb_output_files;
 
-// complex filtergraphs
-extern FilterGraph **filtergraphs;
-extern int        nb_filtergraphs;
+// // complex filtergraphs
+// extern FilterGraph **filtergraphs;
+// extern int        nb_filtergraphs;
 
-// standalone decoders (not tied to demuxed streams)
-extern Decoder     **decoders;
-extern int        nb_decoders;
+// // standalone decoders (not tied to demuxed streams)
+// extern Decoder     **decoders;
+// extern int        nb_decoders;
 
-extern char *vstats_filename;
+// extern char *vstats_filename;
 
-extern float dts_delta_threshold;
-extern float dts_error_threshold;
+// extern float dts_delta_threshold;
+// extern float dts_error_threshold;
 
-extern enum VideoSyncMethod video_sync_method;
-extern float frame_drop_threshold;
-extern int do_benchmark;
-extern int do_benchmark_all;
-extern int do_hex_dump;
-extern int do_pkt_dump;
-extern int copy_ts;
-extern int start_at_zero;
-extern int copy_tb;
-extern int debug_ts;
-extern int exit_on_error;
-extern int abort_on_flags;
-extern int print_stats;
-extern int64_t stats_period;
-extern int stdin_interaction;
-extern AVIOContext *progress_avio;
-extern float max_error_rate;
+// extern enum VideoSyncMethod video_sync_method;
+// extern float frame_drop_threshold;
+// extern int do_benchmark;
+// extern int do_benchmark_all;
+// extern int do_hex_dump;
+// extern int do_pkt_dump;
+// extern int copy_ts;
+// extern int start_at_zero;
+// extern int copy_tb;
+// extern int debug_ts;
+// extern int exit_on_error;
+// extern int abort_on_flags;
+// extern int print_stats;
+// extern int64_t stats_period;
+// extern int stdin_interaction;
+// extern AVIOContext *progress_avio;
+// extern float max_error_rate;
 
-extern char *filter_nbthreads;
-extern int filter_complex_nbthreads;
-extern int filter_buffered_frames;
-extern int vstats_version;
-extern int print_graphs;
-extern char *print_graphs_file;
-extern char *print_graphs_format;
-extern int auto_conversion_filters;
+// extern char *filter_nbthreads;
+// extern int filter_complex_nbthreads;
+// extern int filter_buffered_frames;
+// extern int vstats_version;
+// extern int print_graphs;
+// extern char *print_graphs_file;
+// extern char *print_graphs_format;
+// extern int auto_conversion_filters;
 
-extern const AVIOInterruptCB int_cb;
+// extern const AVIOInterruptCB int_cb;
 
+// extern const OptionDef options[];
+// extern HWDevice *filter_hw_device;
+
+// extern atomic_uint nb_output_dumped;
+
+// extern int ignore_unknown_streams;
+// extern int copy_unknown_streams;
+
+// extern int recast_media;
+
+// extern FILE *vstats_file;
+
+typedef struct FFGlobalParam {
+    InputFile** input_files;
+    int nb_input_files;
+
+    OutputFile** output_files;
+    int nb_output_files;
+
+    // complex filtergraphs
+    FilterGraph** filtergraphs;
+    int nb_filtergraphs;
+
+    // standalone decoders (not tied to demuxed streams)
+    Decoder** decoders;
+    int nb_decoders;
+
+    char* vstats_filename;
+
+    float dts_delta_threshold;
+    float dts_error_threshold;
+
+    enum VideoSyncMethod video_sync_method;
+    float frame_drop_threshold;
+    int do_benchmark;
+    int do_benchmark_all;
+    int do_hex_dump;
+    int do_pkt_dump;
+    int copy_ts;
+    int start_at_zero;
+    int copy_tb;
+    int debug_ts;
+    int exit_on_error;
+    int abort_on_flags;
+    int print_stats;
+    int64_t stats_period;
+    int stdin_interaction;
+    AVIOContext* progress_avio;
+    float max_error_rate;
+
+    char* filter_nbthreads;
+    int filter_complex_nbthreads;
+    int filter_buffered_frames;
+    int vstats_version;
+    int print_graphs;
+    char* print_graphs_file;
+    char* print_graphs_format;
+    int auto_conversion_filters;
+
+    const AVIOInterruptCB int_cb;
+
+    HWDevice* filter_hw_device;
+
+    atomic_uint nb_output_dumped;
+
+    int ignore_unknown_streams;
+    int copy_unknown_streams;
+
+    int recast_media;
+
+    FILE* vstats_file;
+
+    int no_file_overwrite;
+    int file_overwrite;
+
+
+    BenchmarkTimeStamps current_time;
+
+    AVDictionary *sws_dict;
+    AVDictionary *swr_opts;
+    AVDictionary *format_opts, *codec_opts;
+
+    char *program_name;
+    int hide_banner;
+
+    int nb_hw_devices;
+    HWDevice **hw_devices;
+    
+} FFGlobalParam;
+
+extern _Thread_local FFGlobalParam global_param;
 extern const OptionDef options[];
-extern HWDevice *filter_hw_device;
 
-extern atomic_uint nb_output_dumped;
-
-extern int ignore_unknown_streams;
-extern int copy_unknown_streams;
-
-extern int recast_media;
-
-extern FILE *vstats_file;
-
-void term_init(void);
+void term_init(FFGlobalParam *g);
 void term_exit(void);
 
 void show_usage(void);
@@ -808,18 +962,18 @@ void show_usage(void);
 int check_avoptions_used(const AVDictionary *opts, const AVDictionary *opts_used,
                          void *logctx, int decode);
 
-int assert_file_overwrite(const char *filename);
+int assert_file_overwrite(const char *filename, FFGlobalParam *global_param);
 int find_codec(void *logctx, const char *name,
-               enum AVMediaType type, int encoder, const AVCodec **codec);
-int parse_and_set_vsync(const char *arg, enum VideoSyncMethod *vsync_var, int file_idx, int st_idx, int is_global);
+               enum AVMediaType type, int encoder, const AVCodec **codec, FFGlobalParam *global_param);
+int parse_and_set_vsync(const char *arg, enum VideoSyncMethod *vsync_var, int file_idx, int st_idx, int is_global, FFGlobalParam *global_param);
 
 int filtergraph_is_simple(const FilterGraph *fg);
 int fg_create_simple(FilterGraph **pfg,
                      InputStream *ist,
                      char **graph_desc,
                      Scheduler *sch, unsigned sched_idx_enc,
-                     const OutputFilterOptions *opts);
-int fg_finalise_bindings(void);
+                     const OutputFilterOptions *opts, FFGlobalParam *global_param);
+int fg_finalise_bindings(FFGlobalParam *global_param);
 
 /**
  * Get our axiliary frame data attached to the frame, allocating it
@@ -843,33 +997,33 @@ int ofilter_bind_enc(OutputFilter *ofilter,
  *                   takes ownership of it.
  */
 int fg_create(FilterGraph **pfg, char **graph_desc, Scheduler *sch,
-              const OutputFilterOptions *opts);
+              const OutputFilterOptions *opts, FFGlobalParam *global_param);
 
 void fg_free(FilterGraph **pfg);
 
 void fg_send_command(FilterGraph *fg, double time, const char *target,
                      const char *command, const char *arg, int all_filters);
 
-int ffmpeg_parse_options(int argc, char **argv, Scheduler *sch);
+int ffmpeg_parse_options(int argc, char **argv, Scheduler *sch, FFGlobalParam *global_param);
 
 void enc_stats_write(OutputStream *ost, EncStats *es,
                      const AVFrame *frame, const AVPacket *pkt,
                      uint64_t frame_num);
 
-HWDevice *hw_device_get_by_name(const char *name);
-HWDevice *hw_device_get_by_type(enum AVHWDeviceType type);
-int hw_device_init_from_string(const char *arg, HWDevice **dev);
+HWDevice *hw_device_get_by_name(const char *name, FFGlobalParam *global_param);
+HWDevice *hw_device_get_by_type(enum AVHWDeviceType type, FFGlobalParam *global_param);
+int hw_device_init_from_string(const char *arg, HWDevice **dev, FFGlobalParam *global_param);
 int hw_device_init_from_type(enum AVHWDeviceType type,
                              const char *device,
-                             HWDevice **dev_out);
-void hw_device_free_all(void);
+                             HWDevice **dev_out, FFGlobalParam *global_param);
+void hw_device_free_all(FFGlobalParam *global_param);
 
 /**
  * Get a hardware device to be used with this filtergraph.
  * The returned reference is owned by the callee, the caller
  * must ref it explicitly for long-term use.
  */
-AVBufferRef *hw_device_for_filter(void);
+AVBufferRef *hw_device_for_filter(FFGlobalParam *global_param);
 
 /**
  * Create a standalone decoder.
@@ -887,7 +1041,7 @@ int dec_create(const OptionsContext *o, const char *arg, Scheduler *sch);
  */
 int dec_init(Decoder **pdec, Scheduler *sch,
              AVDictionary **dec_opts, const DecoderOpts *o,
-             AVFrame *param_out);
+             AVFrame *param_out, FFGlobalParam *global_param);
 void dec_free(Decoder **pdec);
 
 /*
@@ -912,7 +1066,7 @@ int dec_request_view(Decoder *dec, const ViewSpecifier *vs,
                      SchedulerNode *src);
 
 int enc_alloc(Encoder **penc, const AVCodec *codec,
-              Scheduler *sch, unsigned sch_idx, void *log_parent);
+              Scheduler *sch, unsigned sch_idx, void *log_parent, FFGlobalParam *global_param);
 void enc_free(Encoder **penc);
 
 int enc_open(void *opaque, const AVFrame *frame);
@@ -947,17 +1101,17 @@ int ist_filter_add(InputStream *ist, InputFilter *ifilter, int is_simple,
 /**
  * Find an unused input stream of given type.
  */
-InputStream *ist_find_unused(enum AVMediaType type);
+InputStream *ist_find_unused(enum AVMediaType type, FFGlobalParam *global_param);
 
 /* iterate over all input streams in all input files;
  * pass NULL to start iteration */
-InputStream *ist_iter(InputStream *prev);
+InputStream *ist_iter(InputStream *prev, FFGlobalParam *global_param);
 
 /* iterate over all output streams in all output files;
  * pass NULL to start iteration */
-OutputStream *ost_iter(OutputStream *prev);
+OutputStream *ost_iter(OutputStream *prev, FFGlobalParam *global_param);
 
-void update_benchmark(const char *fmt, ...);
+void update_benchmark(FFGlobalParam *global_param, const char *fmt, ...);
 
 const char *opt_match_per_type_str(const SpecifierOptList *sol,
                                    char mediatype);
@@ -983,5 +1137,5 @@ int view_specifier_parse(const char **pspec, ViewSpecifier *vs);
 
 int muxer_thread(void *arg);
 int encoder_thread(void *arg);
-
+int ffmpeg(int argc, const char **argv);
 #endif /* FFTOOLS_FFMPEG_H */

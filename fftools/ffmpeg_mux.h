@@ -119,6 +119,7 @@ typedef struct Muxer {
 
     SyncQueue              *sq_mux;
     AVPacket               *sq_pkt;
+    struct FFGlobalParam *global_param;
 } Muxer;
 
 int mux_check_init(void *arg);

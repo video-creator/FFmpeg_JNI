@@ -44,21 +44,22 @@ extern const char program_name[];
  */
 extern const int program_birth_year;
 
-extern AVDictionary *sws_dict;
-extern AVDictionary *swr_opts;
-extern AVDictionary *format_opts, *codec_opts;
-extern int hide_banner;
+// extern AVDictionary *sws_dict;
+// extern AVDictionary *swr_opts;
+// extern AVDictionary *format_opts, *codec_opts;
+// extern int hide_banner;
 
 /**
  * Initialize dynamic library loading
  */
 void init_dynload(void);
+typedef struct FFGlobalParam FFGlobalParam;
 
 /**
  * Uninitialize the cmdutils option system, in particular
  * free the *_opts contexts and their contents.
  */
-void uninit_opts(void);
+void uninit_opts(FFGlobalParam *global_param);
 
 /**
  * Trivial log callback.
@@ -369,6 +370,7 @@ typedef struct OptionParseContext {
 
     /* parsing state */
     OptionGroup cur_group;
+    struct FFGlobalParam *global_param;
 } OptionParseContext;
 
 /**
@@ -408,7 +410,7 @@ void uninit_parse_context(OptionParseContext *octx);
 /**
  * Find the '-loglevel' option in the command line args and apply it.
  */
-void parse_loglevel(int argc, char **argv, const OptionDef *options);
+void parse_loglevel(int argc, char **argv, const OptionDef *options, struct FFGlobalParam *global_param);
 
 /**
  * Return index of option opt in argv or 0 if not found.
@@ -479,7 +481,7 @@ static inline void print_error(const char *filename, int err)
  * current version of the repository and of the libav* libraries used by
  * the program.
  */
-void show_banner(int argc, char **argv, const OptionDef *options);
+void show_banner(int argc, char **argv, const OptionDef *options, FFGlobalParam *global_param);
 
 /**
  * Return a positive value if a line read from standard input

@@ -29,6 +29,7 @@ ALLFFLIBS =            \
     avutil             \
     swscale            \
     swresample         \
+	ffservice		   \
 
 # $(FFLIBS-yes) needs to be in linking order
 FFLIBS-$(CONFIG_AVDEVICE)   += avdevice
@@ -37,6 +38,7 @@ FFLIBS-$(CONFIG_AVFORMAT)   += avformat
 FFLIBS-$(CONFIG_AVCODEC)    += avcodec
 FFLIBS-$(CONFIG_SWRESAMPLE) += swresample
 FFLIBS-$(CONFIG_SWSCALE)    += swscale
+FFLIBS-$(CONFIG_FFSERVICE)  += ffservice
 
 FFLIBS := avutil
 

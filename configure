@@ -2157,6 +2157,7 @@ LIBRARY_LIST="
     avcodec
     swresample
     avutil
+    ffservice
 "
 
 LICENSE_LIST="
@@ -4253,7 +4254,7 @@ swresample_suggest="libm libsoxr stdatomic"
 swscale_deps="avutil"
 swscale_suggest="libm stdatomic"
 shader_compression_suggest="zlib"
-
+ffservice_deps="avformat avcodec swresample swscale"
 avcodec_extralibs="pthreads_extralibs iconv_extralibs dxva2_extralibs liblcevc_dec_extralibs lcms2_extralibs"
 avfilter_extralibs="pthreads_extralibs"
 avutil_extralibs="d3d11va_extralibs d3d12va_extralibs mediacodec_extralibs nanosleep_extralibs pthreads_extralibs vaapi_drm_extralibs vaapi_x11_extralibs vaapi_win32_extralibs vdpau_x11_extralibs"
@@ -7836,7 +7837,7 @@ void (^block)(void);
 EOF
 
 # add some linker flags
-check_ldflags -Wl,-rpath-link=:libswresample:libswscale:libavfilter:libavdevice:libavformat:libavcodec:libavutil
+check_ldflags -Wl,-rpath-link=:libswresample:libswscale:libavfilter:libavdevice:libavformat:libavcodec:libavutil:ffservice
 enabled rpath && add_ldexeflags -Wl,-rpath,$libdir && add_ldsoflags -Wl,-rpath,$libdir
 test_ldflags -Wl,-Bsymbolic && append SHFLAGS -Wl,-Bsymbolic
 
@@ -8747,6 +8748,7 @@ extralibs_avdevice="$avdevice_extralibs"
 extralibs_avfilter="$avfilter_extralibs"
 extralibs_swscale="$swscale_extralibs"
 extralibs_swresample="$swresample_extralibs"
+extralibs_ffservice="$ffservice_extralibs"
 EOF
 
 for lib in $LIBRARY_LIST; do

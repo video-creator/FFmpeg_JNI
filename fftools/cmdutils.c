@@ -28,7 +28,7 @@
 /* Include only the enabled headers since some compilers (namely, Sun
    Studio) will not omit unused inline functions and create undefined
    references to libraries that are not being built. */
-
+#include "ffmpeg.h"
 #include "config.h"
 #include "compat/va_copy.h"
 #include "libavformat/avformat.h"
@@ -53,18 +53,18 @@
 #include "compat/w32dlfcn.h"
 #endif
 
-AVDictionary *sws_dict;
-AVDictionary *swr_opts;
-AVDictionary *format_opts, *codec_opts;
+// AVDictionary *sws_dict;
+// AVDictionary *swr_opts;
+// AVDictionary *format_opts, *codec_opts;
 
-int hide_banner = 0;
+// int hide_banner = 0;
 
-void uninit_opts(void)
+void uninit_opts(FFGlobalParam *g)
 {
-    av_dict_free(&swr_opts);
-    av_dict_free(&sws_dict);
-    av_dict_free(&format_opts);
-    av_dict_free(&codec_opts);
+    av_dict_free(&g->swr_opts);
+    av_dict_free(&g->sws_dict);
+    av_dict_free(&g->format_opts);
+    av_dict_free(&g->codec_opts);
 }
 
 void log_callback_help(void *ptr, int level, const char *fmt, va_list vl)
@@ -553,7 +553,7 @@ static void check_options(const OptionDef *po)
     }
 }
 
-void parse_loglevel(int argc, char **argv, const OptionDef *options)
+void parse_loglevel(int argc, char **argv, const OptionDef *options, FFGlobalParam *global_param)
 {
     int idx;
     char *env;
@@ -583,7 +583,7 @@ void parse_loglevel(int argc, char **argv, const OptionDef *options)
     freeenv_utf8(env);
     idx = locate_option(argc, argv, options, "hide_banner");
     if (idx)
-        hide_banner = 1;
+        global_param->hide_banner = 1;
 }
 
 static const AVOption *opt_find(void *obj, const char *name, const char *unit,
@@ -598,6 +598,7 @@ static const AVOption *opt_find(void *obj, const char *name, const char *unit,
 #define FLAGS ((o->type == AV_OPT_TYPE_FLAGS && (arg[0]=='-' || arg[0]=='+')) ? AV_DICT_APPEND : 0)
 int opt_default(void *optctx, const char *opt, const char *arg)
 {
+    OptionsContext *oo = (OptionsContext *)optctx;
     const AVOption *o;
     int consumed = 0;
     char opt_stripped[128];
@@ -621,12 +622,12 @@ int opt_default(void *optctx, const char *opt, const char *arg)
                          AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ)) ||
         ((opt[0] == 'v' || opt[0] == 'a' || opt[0] == 's') &&
          (o = opt_find(&cc, opt + 1, NULL, 0, AV_OPT_SEARCH_FAKE_OBJ)))) {
-        av_dict_set(&codec_opts, opt, arg, FLAGS);
+        av_dict_set(&oo->global_param->codec_opts, opt, arg, FLAGS);
         consumed = 1;
     }
     if ((o = opt_find(&fc, opt, NULL, 0,
                          AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ))) {
-        av_dict_set(&format_opts, opt, arg, FLAGS);
+        av_dict_set(&oo->global_param->format_opts, opt, arg, FLAGS);
         if (consumed)
             av_log(NULL, AV_LOG_VERBOSE, "Routing option %s to both codec and muxer layer\n", opt);
         consumed = 1;
@@ -640,7 +641,7 @@ int opt_default(void *optctx, const char *opt, const char *arg)
             av_log(NULL, AV_LOG_ERROR, "Directly using swscale dimensions/format options is not supported, please use the -s or -pix_fmt options\n");
             return AVERROR(EINVAL);
         }
-        av_dict_set(&sws_dict, opt, arg, FLAGS);
+        av_dict_set(&oo->global_param->sws_dict, opt, arg, FLAGS);
 
         consumed = 1;
     }
@@ -653,7 +654,7 @@ int opt_default(void *optctx, const char *opt, const char *arg)
 #if CONFIG_SWRESAMPLE
     if (!consumed && (o=opt_find(&swr_class, opt, NULL, 0,
                                     AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ))) {
-        av_dict_set(&swr_opts, opt, arg, FLAGS);
+        av_dict_set(&oo->global_param->swr_opts, opt, arg, FLAGS);
         consumed = 1;
     }
 #endif
@@ -704,15 +705,15 @@ static int finish_group(OptionParseContext *octx, int group_idx,
     *g             = octx->cur_group;
     g->arg         = arg;
     g->group_def   = l->group_def;
-    g->sws_dict    = sws_dict;
-    g->swr_opts    = swr_opts;
-    g->codec_opts  = codec_opts;
-    g->format_opts = format_opts;
+    g->sws_dict    = octx->global_param->sws_dict;
+    g->swr_opts    = octx->global_param->swr_opts;
+    g->codec_opts  = octx->global_param->codec_opts;
+    g->format_opts = octx->global_param->format_opts;
 
-    codec_opts  = NULL;
-    format_opts = NULL;
-    sws_dict    = NULL;
-    swr_opts    = NULL;
+    octx->global_param->codec_opts  = NULL;
+    octx->global_param->format_opts = NULL;
+    octx->global_param->sws_dict    = NULL;
+    octx->global_param->swr_opts    = NULL;
 
     memset(&octx->cur_group, 0, sizeof(octx->cur_group));
 
@@ -745,9 +746,9 @@ static int init_parse_context(OptionParseContext *octx,
 {
     static const OptionGroupDef global_group = { "global" };
     int i;
-
+    FFGlobalParam *param = octx->global_param;
     memset(octx, 0, sizeof(*octx));
-
+    octx->global_param = param; 
     octx->groups    = av_calloc(nb_groups, sizeof(*octx->groups));
     if (!octx->groups)
         return AVERROR(ENOMEM);
@@ -784,7 +785,7 @@ void uninit_parse_context(OptionParseContext *octx)
     av_freep(&octx->cur_group.opts);
     av_freep(&octx->global_opts.opts);
 
-    uninit_opts();
+    uninit_opts(octx->global_param);
 }
 
 int split_commandline(OptionParseContext *octx, int argc, char *argv[],
@@ -901,7 +902,7 @@ do {                                                                           \
         return AVERROR_OPTION_NOT_FOUND;
     }
 
-    if (octx->cur_group.nb_opts || codec_opts || format_opts)
+    if (octx->cur_group.nb_opts || octx->global_param->codec_opts || octx->global_param->format_opts)
         av_log(NULL, AV_LOG_WARNING, "Trailing option(s) found in the "
                "command: may be ignored.\n");
 

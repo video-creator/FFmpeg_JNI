@@ -49,46 +49,7 @@
 #include "libavutil/stereo3d.h"
 #include "graph/graphprint.h"
 
-HWDevice *filter_hw_device;
 
-char *vstats_filename;
-
-float dts_delta_threshold   = 10;
-float dts_error_threshold   = 3600*30;
-
-#if FFMPEG_OPT_VSYNC
-enum VideoSyncMethod video_sync_method = VSYNC_AUTO;
-#endif
-float frame_drop_threshold = 0;
-int do_benchmark      = 0;
-int do_benchmark_all  = 0;
-int do_hex_dump       = 0;
-int do_pkt_dump       = 0;
-int copy_ts           = 0;
-int start_at_zero     = 0;
-int copy_tb           = -1;
-int debug_ts          = 0;
-int exit_on_error     = 0;
-int abort_on_flags    = 0;
-int print_stats       = -1;
-int stdin_interaction = 1;
-float max_error_rate  = 2.0/3;
-char *filter_nbthreads;
-int filter_complex_nbthreads = 0;
-int filter_buffered_frames = 0;
-int vstats_version = 2;
-int print_graphs = 0;
-char *print_graphs_file = NULL;
-char *print_graphs_format = NULL;
-int auto_conversion_filters = 1;
-int64_t stats_period = 500000;
-
-
-static int file_overwrite     = 0;
-static int no_file_overwrite  = 0;
-int ignore_unknown_streams = 0;
-int copy_unknown_streams = 0;
-int recast_media = 0;
 
 // this struct is passed as the optctx argument
 // to func_arg() for global options
@@ -97,6 +58,7 @@ typedef struct GlobalOptionsContext {
 
     char          **filtergraphs;
     int          nb_filtergraphs;
+    OptionsContext o;
 } GlobalOptionsContext;
 
 static void uninit_options(OptionsContext *o)
@@ -151,6 +113,7 @@ static void init_options(OptionsContext *o)
     o->input_sync_ref = -1;
     o->find_stream_info = 1;
     o->shortest_buf_duration = 10.f;
+
 }
 
 static int show_hwaccels(void *optctx, const char *opt, const char *arg)
@@ -359,7 +322,7 @@ int view_specifier_parse(const char **pspec, ViewSpecifier *vs)
     return 0;
 }
 
-int parse_and_set_vsync(const char *arg, enum VideoSyncMethod *vsync_var, int file_idx, int st_idx, int is_global)
+int parse_and_set_vsync(const char *arg, enum VideoSyncMethod *vsync_var, int file_idx, int st_idx, int is_global, FFGlobalParam *global_param)
 {
     if      (!av_strcasecmp(arg, "cfr"))         *vsync_var = VSYNC_CFR;
     else if (!av_strcasecmp(arg, "vfr"))         *vsync_var = VSYNC_VFR;
@@ -385,7 +348,7 @@ int parse_and_set_vsync(const char *arg, enum VideoSyncMethod *vsync_var, int fi
         if (ret < 0)
             return ret;
 
-        video_sync_method = num;
+        global_param->video_sync_method = num;
         av_log(NULL, AV_LOG_WARNING, "Passing a number to -vsync is deprecated,"
                " use a string argument as described in the manual.\n");
     }
@@ -395,10 +358,10 @@ int parse_and_set_vsync(const char *arg, enum VideoSyncMethod *vsync_var, int fi
 }
 
 /* Correct input file start times based on enabled streams */
-static void correct_input_start_times(void)
+static void correct_input_start_times(FFGlobalParam *global_param)
 {
-    for (int i = 0; i < nb_input_files; i++) {
-        InputFile       *ifile = input_files[i];
+    for (int i = 0; i < global_param->nb_input_files; i++) {
+        InputFile       *ifile = global_param->input_files[i];
         AVFormatContext    *is = ifile->ctx;
         int64_t new_start_time = INT64_MAX, diff, abs_start_seek;
 
@@ -419,12 +382,12 @@ static void correct_input_start_times(void)
         if (diff) {
             av_log(NULL, AV_LOG_VERBOSE, "Correcting start time of Input #%d by %"PRId64" us.\n", i, diff);
             ifile->start_time_effective = new_start_time;
-            if (copy_ts && start_at_zero)
+            if (global_param->copy_ts && global_param->start_at_zero)
                 ifile->ts_offset = -new_start_time;
-            else if (!copy_ts) {
+            else if (!global_param->copy_ts) {
                 abs_start_seek = is->start_time + ((ifile->start_time != AV_NOPTS_VALUE) ? ifile->start_time : 0);
                 ifile->ts_offset = abs_start_seek > new_start_time ? -abs_start_seek : -new_start_time;
-            } else if (copy_ts)
+            } else if (global_param->copy_ts)
                 ifile->ts_offset = 0;
 
             ifile->ts_offset += ifile->input_ts_offset;
@@ -432,26 +395,26 @@ static void correct_input_start_times(void)
     }
 }
 
-static int apply_sync_offsets(void)
+static int apply_sync_offsets(FFGlobalParam *global_param)
 {
-    for (int i = 0; i < nb_input_files; i++) {
-        InputFile *ref, *self = input_files[i];
+    for (int i = 0; i < global_param->nb_input_files; i++) {
+        InputFile *ref, *self = global_param->input_files[i];
         int64_t adjustment;
         int64_t self_start_time, ref_start_time, self_seek_start, ref_seek_start;
         int start_times_set = 1;
 
         if (self->input_sync_ref == -1 || self->input_sync_ref == i) continue;
-        if (self->input_sync_ref >= nb_input_files || self->input_sync_ref < -1) {
+        if (self->input_sync_ref >= global_param->nb_input_files || self->input_sync_ref < -1) {
             av_log(NULL, AV_LOG_FATAL, "-isync for input %d references non-existent input %d.\n", i, self->input_sync_ref);
             return AVERROR(EINVAL);
         }
 
-        if (copy_ts && !start_at_zero) {
+        if (global_param->copy_ts && !global_param->start_at_zero) {
             av_log(NULL, AV_LOG_FATAL, "Use of -isync requires that start_at_zero be set if copyts is set.\n");
             return AVERROR(EINVAL);
         }
 
-        ref = input_files[self->input_sync_ref];
+        ref = global_param->input_files[self->input_sync_ref];
         if (ref->input_sync_ref != -1 && ref->input_sync_ref != self->input_sync_ref) {
             av_log(NULL, AV_LOG_ERROR, "-isync for input %d references a resynced input %d. Sync not set.\n", i, self->input_sync_ref);
             continue;
@@ -471,7 +434,7 @@ static int apply_sync_offsets(void)
             self_seek_start = self->start_time == AV_NOPTS_VALUE ? 0 : self->start_time;
             ref_seek_start  =  ref->start_time == AV_NOPTS_VALUE ? 0 :  ref->start_time;
 
-            adjustment = (self_start_time - ref_start_time) + !copy_ts*(self_seek_start - ref_seek_start) + ref->input_ts_offset;
+            adjustment = (self_start_time - ref_start_time) + !global_param->copy_ts*(self_seek_start - ref_seek_start) + ref->input_ts_offset;
 
             self->ts_offset += adjustment;
 
@@ -486,13 +449,15 @@ static int apply_sync_offsets(void)
 
 static int opt_filter_threads(void *optctx, const char *opt, const char *arg)
 {
-    av_free(filter_nbthreads);
-    filter_nbthreads = av_strdup(arg);
+    OptionsContext *o = optctx;
+    av_free(o->global_param->filter_nbthreads);
+    o->global_param->filter_nbthreads = av_strdup(arg);
     return 0;
 }
 
 static int opt_abort_on(void *optctx, const char *opt, const char *arg)
 {
+    OptionsContext *o = optctx;
     static const AVOption opts[] = {
         { "abort_on"           , NULL, 0, AV_OPT_TYPE_FLAGS, { .i64 = 0 }, INT64_MIN, (double)INT64_MAX,   .unit = "flags" },
         { "empty_output"       , NULL, 0, AV_OPT_TYPE_CONST, { .i64 = ABORT_ON_FLAG_EMPTY_OUTPUT        }, .unit = "flags" },
@@ -507,11 +472,12 @@ static int opt_abort_on(void *optctx, const char *opt, const char *arg)
     };
     const AVClass *pclass = &class;
 
-    return av_opt_eval_flags(&pclass, &opts[0], arg, &abort_on_flags);
+    return av_opt_eval_flags(&pclass, &opts[0], arg, &o->global_param->abort_on_flags);
 }
 
 static int opt_stats_period(void *optctx, const char *opt, const char *arg)
 {
+    OptionsContext *o = optctx;
     int64_t user_stats_period;
     int ret = av_parse_time(&user_stats_period, arg, 1);
     if (ret < 0)
@@ -522,7 +488,7 @@ static int opt_stats_period(void *optctx, const char *opt, const char *arg)
         return AVERROR(EINVAL);
     }
 
-    stats_period = user_stats_period;
+    o->global_param->stats_period = user_stats_period;
     av_log(NULL, AV_LOG_INFO, "ffmpeg stats and -progress period set to %s.\n", arg);
 
     return 0;
@@ -589,7 +555,7 @@ static int opt_map(void *optctx, const char *opt, const char *arg)
 
         m->group_index = -1;
         file_idx = strtol(arg, &endptr, 0);
-        if (file_idx >= nb_input_files || file_idx < 0)
+        if (file_idx >= o->global_param->nb_input_files || file_idx < 0)
             goto end;
 
         arg = endptr;
@@ -610,7 +576,7 @@ static int opt_map(void *optctx, const char *opt, const char *arg)
         char *endptr;
 
         file_idx = strtol(arg, &endptr, 0);
-        if (file_idx >= nb_input_files || file_idx < 0) {
+        if (file_idx >= o->global_param->nb_input_files || file_idx < 0) {
             av_log(NULL, AV_LOG_FATAL, "Invalid input file index: %d.\n", file_idx);
             ret = AVERROR(EINVAL);
             goto fail;
@@ -646,19 +612,19 @@ static int opt_map(void *optctx, const char *opt, const char *arg)
                 m = &o->stream_maps[i];
                 if (file_idx == m->file_index &&
                     stream_specifier_match(&ss,
-                                           input_files[m->file_index]->ctx,
-                                           input_files[m->file_index]->ctx->streams[m->stream_index],
+                                           o->global_param->input_files[m->file_index]->ctx,
+                                           o->global_param->input_files[m->file_index]->ctx->streams[m->stream_index],
                                            NULL))
                     m->disabled = 1;
             }
         else
-            for (i = 0; i < input_files[file_idx]->nb_streams; i++) {
+            for (i = 0; i < o->global_param->input_files[file_idx]->nb_streams; i++) {
                 if (!stream_specifier_match(&ss,
-                                            input_files[file_idx]->ctx,
-                                            input_files[file_idx]->ctx->streams[i],
+                                            o->global_param->input_files[file_idx]->ctx,
+                                            o->global_param->input_files[file_idx]->ctx->streams[i],
                                             NULL))
                     continue;
-                if (input_files[file_idx]->streams[i]->user_set_discard == AVDISCARD_ALL) {
+                if (o->global_param->input_files[file_idx]->streams[i]->user_set_discard == AVDISCARD_ALL) {
                     disabled = 1;
                     continue;
                 }
@@ -751,6 +717,7 @@ static int opt_qsv_device(void *optctx, const char *opt, const char *arg)
 
 static int opt_init_hw_device(void *optctx, const char *opt, const char *arg)
 {
+    OptionsContext *o = optctx;
     if (!strcmp(arg, "list")) {
         enum AVHWDeviceType type = AV_HWDEVICE_TYPE_NONE;
         printf("Supported hardware device types:\n");
@@ -760,18 +727,19 @@ static int opt_init_hw_device(void *optctx, const char *opt, const char *arg)
         printf("\n");
         return AVERROR_EXIT;
     } else {
-        return hw_device_init_from_string(arg, NULL);
+        return hw_device_init_from_string(arg, NULL, o->global_param);
     }
 }
 
 static int opt_filter_hw_device(void *optctx, const char *opt, const char *arg)
 {
-    if (filter_hw_device) {
+    OptionsContext *o = optctx;
+    if (o->global_param->filter_hw_device) {
         av_log(NULL, AV_LOG_ERROR, "Only one filter device can be used.\n");
         return AVERROR(EINVAL);
     }
-    filter_hw_device = hw_device_get_by_name(arg);
-    if (!filter_hw_device) {
+    o->global_param->filter_hw_device = hw_device_get_by_name(arg,o->global_param);
+    if (!o->global_param->filter_hw_device) {
         av_log(NULL, AV_LOG_ERROR, "Invalid filter device %s.\n", arg);
         return AVERROR(EINVAL);
     }
@@ -802,7 +770,7 @@ static int opt_recording_timestamp(void *optctx, const char *opt, const char *ar
 }
 
 int find_codec(void *logctx, const char *name,
-               enum AVMediaType type, int encoder, const AVCodec **pcodec)
+               enum AVMediaType type, int encoder, const AVCodec **pcodec, FFGlobalParam *global_param)
 {
     const AVCodecDescriptor *desc;
     const char *codec_string = encoder ? "encoder" : "decoder";
@@ -825,7 +793,7 @@ int find_codec(void *logctx, const char *name,
         return encoder ? AVERROR_ENCODER_NOT_FOUND :
                          AVERROR_DECODER_NOT_FOUND;
     }
-    if (codec->type != type && !recast_media) {
+    if (codec->type != type && !global_param->recast_media) {
         av_log(logctx, AV_LOG_FATAL, "Invalid %s type '%s'\n", codec_string, name);
         return AVERROR(EINVAL);
     }
@@ -834,18 +802,18 @@ int find_codec(void *logctx, const char *name,
     return 0;;
 }
 
-int assert_file_overwrite(const char *filename)
+int assert_file_overwrite(const char *filename, FFGlobalParam *global_param)
 {
     const char *proto_name = avio_find_protocol_name(filename);
 
-    if (file_overwrite && no_file_overwrite) {
+    if (global_param->file_overwrite && global_param->no_file_overwrite) {
         fprintf(stderr, "Error, both -y and -n supplied. Exiting.\n");
         return AVERROR(EINVAL);
     }
 
-    if (!file_overwrite) {
+    if (!global_param->file_overwrite) {
         if (proto_name && !strcmp(proto_name, "file") && avio_check(filename, 0) == 0) {
-            if (stdin_interaction && !no_file_overwrite) {
+            if (global_param->stdin_interaction && !global_param->no_file_overwrite) {
                 fprintf(stderr,"File '%s' already exists. Overwrite? [y/N] ", filename);
                 fflush(stderr);
                 term_exit();
@@ -854,7 +822,7 @@ int assert_file_overwrite(const char *filename)
                     av_log(NULL, AV_LOG_FATAL, "Not overwriting - exiting\n");
                     return AVERROR_EXIT;
                 }
-                term_init();
+                term_init(global_param);
             }
             else {
                 av_log(NULL, AV_LOG_FATAL, "File '%s' already exists. Exiting.\n", filename);
@@ -864,8 +832,8 @@ int assert_file_overwrite(const char *filename)
     }
 
     if (proto_name && !strcmp(proto_name, "file")) {
-        for (int i = 0; i < nb_input_files; i++) {
-             InputFile *file = input_files[i];
+        for (int i = 0; i < global_param->nb_input_files; i++) {
+             InputFile *file = global_param->input_files[i];
              if (file->ctx->iformat->flags & AVFMT_NOFILE)
                  continue;
              if (!strcmp(filename, file->ctx->url)) {
@@ -916,11 +884,11 @@ static int opt_target(void *optctx, const char *opt, const char *arg)
         arg += 5;
     } else {
         /* Try to determine PAL/NTSC by peeking in the input files */
-        if (nb_input_files) {
+        if (o->global_param->nb_input_files) {
             int i, j;
-            for (j = 0; j < nb_input_files; j++) {
-                for (i = 0; i < input_files[j]->nb_streams; i++) {
-                    AVStream *st = input_files[j]->ctx->streams[i];
+            for (j = 0; j < o->global_param->nb_input_files; j++) {
+                for (i = 0; i < o->global_param->input_files[j]->nb_streams; i++) {
+                    AVStream *st = o->global_param->input_files[j]->ctx->streams[i];
                     int64_t fr;
                     if (st->codecpar->codec_type != AVMEDIA_TYPE_VIDEO)
                         continue;
@@ -955,19 +923,19 @@ static int opt_target(void *optctx, const char *opt, const char *arg)
 
         parse_option(o, "s", norm == PAL ? "352x288" : "352x240", options);
         parse_option(o, "r", frame_rates[norm], options);
-        opt_default(NULL, "g", norm == PAL ? "15" : "18");
+        opt_default(o, "g", norm == PAL ? "15" : "18");
 
-        opt_default(NULL, "b:v", "1150000");
-        opt_default(NULL, "maxrate:v", "1150000");
-        opt_default(NULL, "minrate:v", "1150000");
-        opt_default(NULL, "bufsize:v", "327680"); // 40*1024*8;
+        opt_default(o, "b:v", "1150000");
+        opt_default(o, "maxrate:v", "1150000");
+        opt_default(o, "minrate:v", "1150000");
+        opt_default(o, "bufsize:v", "327680"); // 40*1024*8;
 
-        opt_default(NULL, "b:a", "224000");
+        opt_default(o, "b:a", "224000");
         parse_option(o, "ar", "44100", options);
         parse_option(o, "ac", "2", options);
 
-        opt_default(NULL, "packetsize", "2324");
-        opt_default(NULL, "muxrate", "1411200"); // 2352 * 75 * 8;
+        opt_default(o, "packetsize", "2324");
+        opt_default(o, "muxrate", "1411200"); // 2352 * 75 * 8;
 
         /* We have to offset the PTS, so that it is consistent with the SCR.
            SCR starts at 36000, but the first two packs contain only padding
@@ -984,18 +952,18 @@ static int opt_target(void *optctx, const char *opt, const char *arg)
         parse_option(o, "s", norm == PAL ? "480x576" : "480x480", options);
         parse_option(o, "r", frame_rates[norm], options);
         parse_option(o, "pix_fmt", "yuv420p", options);
-        opt_default(NULL, "g", norm == PAL ? "15" : "18");
+        opt_default(o, "g", norm == PAL ? "15" : "18");
 
-        opt_default(NULL, "b:v", "2040000");
-        opt_default(NULL, "maxrate:v", "2516000");
-        opt_default(NULL, "minrate:v", "0"); // 1145000;
-        opt_default(NULL, "bufsize:v", "1835008"); // 224*1024*8;
-        opt_default(NULL, "scan_offset", "1");
+        opt_default(o, "b:v", "2040000");
+        opt_default(o, "maxrate:v", "2516000");
+        opt_default(o, "minrate:v", "0"); // 1145000;
+        opt_default(o, "bufsize:v", "1835008"); // 224*1024*8;
+        opt_default(o, "scan_offset", "1");
 
-        opt_default(NULL, "b:a", "224000");
+        opt_default(o, "b:a", "224000");
         parse_option(o, "ar", "44100", options);
 
-        opt_default(NULL, "packetsize", "2324");
+        opt_default(o, "packetsize", "2324");
 
     } else if (!strcmp(arg, "dvd")) {
 
@@ -1006,17 +974,17 @@ static int opt_target(void *optctx, const char *opt, const char *arg)
         parse_option(o, "s", norm == PAL ? "720x576" : "720x480", options);
         parse_option(o, "r", frame_rates[norm], options);
         parse_option(o, "pix_fmt", "yuv420p", options);
-        opt_default(NULL, "g", norm == PAL ? "15" : "18");
+        opt_default(o, "g", norm == PAL ? "15" : "18");
 
-        opt_default(NULL, "b:v", "6000000");
-        opt_default(NULL, "maxrate:v", "9000000");
-        opt_default(NULL, "minrate:v", "0"); // 1500000;
-        opt_default(NULL, "bufsize:v", "1835008"); // 224*1024*8;
+        opt_default(o, "b:v", "6000000");
+        opt_default(o, "maxrate:v", "9000000");
+        opt_default(o, "minrate:v", "0"); // 1500000;
+        opt_default(o, "bufsize:v", "1835008"); // 224*1024*8;
 
-        opt_default(NULL, "packetsize", "2048");  // from www.mpucoder.com: DVD sectors contain 2048 bytes of data, this is also the size of one pack.
-        opt_default(NULL, "muxrate", "10080000"); // from mplex project: data_rate = 1260000. mux_rate = data_rate * 8
+        opt_default(o, "packetsize", "2048");  // from www.mpucoder.com: DVD sectors contain 2048 bytes of data, this is also the size of one pack.
+        opt_default(o, "muxrate", "10080000"); // from mplex project: data_rate = 1260000. mux_rate = data_rate * 8
 
-        opt_default(NULL, "b:a", "448000");
+        opt_default(o, "b:a", "448000");
         parse_option(o, "ar", "48000", options);
 
     } else if (!strncmp(arg, "dv", 2)) {
@@ -1036,16 +1004,17 @@ static int opt_target(void *optctx, const char *opt, const char *arg)
         return AVERROR(EINVAL);
     }
 
-    av_dict_copy(&o->g->codec_opts,  codec_opts, AV_DICT_DONT_OVERWRITE);
-    av_dict_copy(&o->g->format_opts, format_opts, AV_DICT_DONT_OVERWRITE);
+    av_dict_copy(&o->g->codec_opts,  o->global_param->codec_opts, AV_DICT_DONT_OVERWRITE);
+    av_dict_copy(&o->g->format_opts, o->global_param->format_opts, AV_DICT_DONT_OVERWRITE);
 
     return 0;
 }
 
 static int opt_vstats_file(void *optctx, const char *opt, const char *arg)
 {
-    av_free (vstats_filename);
-    vstats_filename = av_strdup (arg);
+    OptionsContext *o = optctx;
+    av_free (o->global_param->vstats_filename);
+    o->global_param->vstats_filename = av_strdup (arg);
     return 0;
 }
 
@@ -1086,19 +1055,19 @@ static int opt_data_frames(void *optctx, const char *opt, const char *arg)
 static int opt_default_new(OptionsContext *o, const char *opt, const char *arg)
 {
     int ret;
-    AVDictionary *cbak = codec_opts;
-    AVDictionary *fbak = format_opts;
-    codec_opts = NULL;
-    format_opts = NULL;
+    AVDictionary *cbak = o->global_param->codec_opts;
+    AVDictionary *fbak = o->global_param->format_opts;
+    o->global_param->codec_opts = NULL;
+    o->global_param->format_opts = NULL;
 
-    ret = opt_default(NULL, opt, arg);
+    ret = opt_default(o, opt, arg);
 
-    av_dict_copy(&o->g->codec_opts , codec_opts, 0);
-    av_dict_copy(&o->g->format_opts, format_opts, 0);
-    av_dict_free(&codec_opts);
-    av_dict_free(&format_opts);
-    codec_opts = cbak;
-    format_opts = fbak;
+    av_dict_copy(&o->g->codec_opts , o->global_param->codec_opts, 0);
+    av_dict_copy(&o->g->format_opts, o->global_param->format_opts, 0);
+    av_dict_free(&o->global_param->codec_opts);
+    av_dict_free(&o->global_param->format_opts);
+    o->global_param->codec_opts = cbak;
+    o->global_param->format_opts = fbak;
 
     return ret;
 }
@@ -1226,8 +1195,9 @@ static int opt_audio_filters(void *optctx, const char *opt, const char *arg)
 #if FFMPEG_OPT_VSYNC
 static int opt_vsync(void *optctx, const char *opt, const char *arg)
 {
+    OptionsContext *o = optctx;
     av_log(NULL, AV_LOG_WARNING, "-vsync is deprecated. Use -fps_mode\n");
-    return parse_and_set_vsync(arg, &video_sync_method, -1, -1, 1);
+    return parse_and_set_vsync(arg, &o->global_param->video_sync_method, -1, -1, 1, o->global_param);
 }
 #endif
 
@@ -1434,7 +1404,7 @@ static const OptionGroupDef groups[] = {
 
 static int open_files(OptionGroupList *l, const char *inout, Scheduler *sch,
                       int (*open_file)(const OptionsContext*, const char*,
-                                       Scheduler*))
+                                       Scheduler*), FFGlobalParam *global_param)
 {
     int i, ret;
 
@@ -1444,7 +1414,7 @@ static int open_files(OptionGroupList *l, const char *inout, Scheduler *sch,
 
         init_options(&o);
         o.g = g;
-
+        o.global_param = global_param;
         ret = parse_optgroup(&o, g, options);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "Error parsing options for %s file "
@@ -1467,7 +1437,7 @@ static int open_files(OptionGroupList *l, const char *inout, Scheduler *sch,
     return 0;
 }
 
-int ffmpeg_parse_options(int argc, char **argv, Scheduler *sch)
+int ffmpeg_parse_options(int argc, char **argv, Scheduler *sch, FFGlobalParam *global_param)
 {
     GlobalOptionsContext go = { .sch = sch };
     OptionParseContext octx;
@@ -1475,7 +1445,7 @@ int ffmpeg_parse_options(int argc, char **argv, Scheduler *sch)
     int ret;
 
     memset(&octx, 0, sizeof(octx));
-
+    octx.global_param = global_param;
     /* split the commandline into an internal representation */
     ret = split_commandline(&octx, argc, argv, options, groups,
                             FF_ARRAY_ELEMS(groups));
@@ -1485,54 +1455,141 @@ int ffmpeg_parse_options(int argc, char **argv, Scheduler *sch)
     }
 
     /* apply global options */
-    ret = parse_optgroup(&go, &octx.global_opts, options);
+    ret = parse_optgroup(&go.o, &octx.global_opts, options);
     if (ret < 0) {
         errmsg = "parsing global options";
         goto fail;
     }
+    for (int i = 0; i < octx.global_opts.nb_opts; i++) {
+        if (strcmp(octx.global_opts.opts[i].key, "y") == 0) {
+            global_param->file_overwrite = go.o.file_overwrite;
+        } else if (strcmp(octx.global_opts.opts[i].key, "n") == 0) {
+            global_param->no_file_overwrite = go.o.no_file_overwrite;
+        } else if (strcmp(octx.global_opts.opts[i].key, "ignore_unknown") == 0) {
+            global_param->ignore_unknown_streams = go.o.ignore_unknown_streams;
+        } else if (strcmp(octx.global_opts.opts[i].key, "copy_unknown") == 0) {
+            global_param->copy_unknown_streams = go.o.copy_unknown_streams;
+        } else if (strcmp(octx.global_opts.opts[i].key, "recast_media") == 0) {
+            global_param->recast_media = go.o.recast_media;
+        } else if (strcmp(octx.global_opts.opts[i].key, "hide_banner") == 0) {
+            global_param->hide_banner = go.o.hide_banner;
+        } else if (strcmp(octx.global_opts.opts[i].key, "benchmark") == 0) {
+            global_param->do_benchmark = go.o.do_benchmark;
+        } else if (strcmp(octx.global_opts.opts[i].key, "benchmark_all") == 0) {
+            global_param->do_benchmark_all = go.o.do_benchmark_all;
+        } else if (strcmp(octx.global_opts.opts[i].key, "hex") == 0) {
+            global_param->do_hex_dump = go.o.do_hex_dump;
+        } else if (strcmp(octx.global_opts.opts[i].key, "dump") == 0) {
+            global_param->do_pkt_dump = go.o.do_pkt_dump;
+        } else if (strcmp(octx.global_opts.opts[i].key, "stdin") == 0) {
+            global_param->stdin_interaction = go.o.stdin_interaction;
+        } else if (strcmp(octx.global_opts.opts[i].key, "frame_drop_threshold") == 0) {
+            global_param->frame_drop_threshold = go.o.frame_drop_threshold;
+        } else if (strcmp(octx.global_opts.opts[i].key, "copyts") == 0) {
+            global_param->copy_ts = go.o.copy_ts;
+        } else if (strcmp(octx.global_opts.opts[i].key, "start_at_zero") == 0) {
+            global_param->start_at_zero = go.o.start_at_zero;
+        } else if (strcmp(octx.global_opts.opts[i].key, "copytb") == 0) {
+            global_param->copy_tb = go.o.copy_tb;
+        } else if (strcmp(octx.global_opts.opts[i].key, "debug_ts") == 0) {
+            global_param->debug_ts = go.o.debug_ts;
+        } else if (strcmp(octx.global_opts.opts[i].key, "dts_delta_threshold") == 0) {
+            global_param->dts_delta_threshold = go.o.dts_delta_threshold;
+        } else if (strcmp(octx.global_opts.opts[i].key, "dts_error_threshold") == 0) {
+            global_param->dts_error_threshold = go.o.dts_error_threshold;
+        } else if (strcmp(octx.global_opts.opts[i].key, "xerror") == 0) {
+            global_param->exit_on_error = go.o.exit_on_error;
+        } else if (strcmp(octx.global_opts.opts[i].key, "filter_buffered_frames") == 0) {
+            global_param->filter_buffered_frames = go.o.filter_buffered_frames;
+        } else if (strcmp(octx.global_opts.opts[i].key, "filter_complex_threads") == 0) {
+            global_param->filter_complex_nbthreads = go.o.filter_complex_nbthreads;
+        } else if (strcmp(octx.global_opts.opts[i].key, "print_graphs") == 0) {
+            global_param->print_graphs = go.o.print_graphs;
+        } else if (strcmp(octx.global_opts.opts[i].key, "print_graphs_file") == 0) {
+            global_param->print_graphs_file = go.o.print_graphs_file;
+        } else if (strcmp(octx.global_opts.opts[i].key, "print_graphs_format") == 0) {
+            global_param->print_graphs_format = go.o.print_graphs_format;
+        } else if (strcmp(octx.global_opts.opts[i].key, "auto_conversion_filters") == 0) {
+            global_param->auto_conversion_filters = go.o.auto_conversion_filters;
+        } else if (strcmp(octx.global_opts.opts[i].key, "stats") == 0) {
+            global_param->print_stats = go.o.print_stats;
+        } else if (strcmp(octx.global_opts.opts[i].key, "max_error_rate") == 0) {
+            global_param->max_error_rate = go.o.max_error_rate;
+        } else if (strcmp(octx.global_opts.opts[i].key, "vstats_version") == 0) {
+            global_param->vstats_version = go.o.vstats_version;
+        }
+    }
+    // global_param->file_overwrite = go.o.file_overwrite;
+    // global_param->no_file_overwrite = go.o.no_file_overwrite;
+    // global_param->ignore_unknown_streams = go.o.ignore_unknown_streams;
+    // global_param->copy_unknown_streams = go.o.copy_unknown_streams;
+    // global_param->recast_media = go.o.recast_media;
+    // global_param->hide_banner = go.o.hide_banner;
+    // global_param->do_benchmark = go.o.do_benchmark;
+    // global_param->do_benchmark_all = go.o.do_benchmark_all;
+    // global_param->do_hex_dump = go.o.do_hex_dump;
+    // global_param->do_pkt_dump = go.o.do_pkt_dump;
+    // global_param->stdin_interaction = go.o.stdin_interaction;
+    // global_param->frame_drop_threshold = go.o.frame_drop_threshold;
+    // global_param->copy_ts = go.o.copy_ts;
+    // global_param->start_at_zero = go.o.start_at_zero;
+    // global_param->copy_tb = go.o.copy_tb;
+    // global_param->debug_ts = go.o.debug_ts;
+    // global_param->dts_delta_threshold = go.o.dts_delta_threshold;
+    // global_param->dts_error_threshold = go.o.dts_error_threshold;
+    // global_param->exit_on_error = go.o.exit_on_error;
+    // global_param->filter_buffered_frames = go.o.filter_buffered_frames;
+    // global_param->filter_complex_nbthreads = go.o.filter_complex_nbthreads;
+    // global_param->print_graphs = go.o.print_graphs;
+    // global_param->print_graphs_file = go.o.print_graphs_file;
+    // global_param->print_graphs_format = go.o.print_graphs_format;
+    // global_param->auto_conversion_filters = go.o.auto_conversion_filters;
+    // global_param->print_stats = go.o.print_stats;
+    // global_param->max_error_rate = go.o.max_error_rate;
+    // global_param->vstats_version = go.o.vstats_version;
 
     /* configure terminal and setup signal handlers */
-    term_init();
+    term_init(global_param);
 
     /* create complex filtergraphs */
     for (int i = 0; i < go.nb_filtergraphs; i++) {
-        ret = fg_create(NULL, &go.filtergraphs[i], sch, NULL);
+        ret = fg_create(NULL, &go.filtergraphs[i], sch, NULL, global_param);
         go.filtergraphs[i] = NULL;
         if (ret < 0)
             goto fail;
     }
 
     /* open input files */
-    ret = open_files(&octx.groups[GROUP_INFILE], "input", sch, ifile_open);
+    ret = open_files(&octx.groups[GROUP_INFILE], "input", sch, ifile_open, global_param);
     if (ret < 0) {
         errmsg = "opening input files";
         goto fail;
     }
 
     /* open output files */
-    ret = open_files(&octx.groups[GROUP_OUTFILE], "output", sch, of_open);
+    ret = open_files(&octx.groups[GROUP_OUTFILE], "output", sch, of_open, global_param);
     if (ret < 0) {
         errmsg = "opening output files";
         goto fail;
     }
 
     /* create loopback decoders */
-    ret = open_files(&octx.groups[GROUP_DECODER], "decoder", sch, dec_create);
+    ret = open_files(&octx.groups[GROUP_DECODER], "decoder", sch, dec_create, global_param);
     if (ret < 0) {
         errmsg = "creating loopback decoders";
         goto fail;
     }
 
     // bind unbound filtegraph inputs/outputs and check consistency
-    ret = fg_finalise_bindings();
+    ret = fg_finalise_bindings(global_param);
     if (ret < 0) {
         errmsg = "binding filtergraph inputs/outputs";
         goto fail;
     }
 
-    correct_input_start_times();
+    correct_input_start_times(global_param);
 
-    ret = apply_sync_offsets();
+    ret = apply_sync_offsets(global_param);
     if (ret < 0)
         goto fail;
 
@@ -1553,16 +1610,16 @@ static int opt_progress(void *optctx, const char *opt, const char *arg)
 {
     AVIOContext *avio = NULL;
     int ret;
-
+    OptionsContext *o = optctx;
     if (!strcmp(arg, "-"))
         arg = "pipe:";
-    ret = avio_open2(&avio, arg, AVIO_FLAG_WRITE, &int_cb, NULL);
+    ret = avio_open2(&avio, arg, AVIO_FLAG_WRITE, &o->global_param->int_cb, NULL);
     if (ret < 0) {
         av_log(NULL, AV_LOG_ERROR, "Failed to open progress URL \"%s\": %s\n",
                arg, av_err2str(ret));
         return ret;
     }
-    progress_avio = avio;
+    o->global_param->progress_avio = avio;
     return 0;
 }
 
@@ -1617,20 +1674,20 @@ const OptionDef options[] = {
     { "f",                      OPT_TYPE_STRING, OPT_OFFSET | OPT_INPUT | OPT_OUTPUT,
         { .off       = OFFSET(format) },
         "force container format (auto-detected otherwise)", "fmt" },
-    { "y",                      OPT_TYPE_BOOL, 0,
-        {              &file_overwrite },
+    { "y",                      OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        {             .off       = OFFSET(file_overwrite) },
         "overwrite output files" },
-    { "n",                      OPT_TYPE_BOOL, 0,
-        {              &no_file_overwrite },
+    { "n",                      OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        {           .off       = OFFSET( no_file_overwrite) },
         "never overwrite output files" },
-    { "ignore_unknown",         OPT_TYPE_BOOL, OPT_EXPERT,
-        {              &ignore_unknown_streams },
+    { "ignore_unknown",         OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        {            .off =  OFFSET(ignore_unknown_streams) },
         "Ignore unknown stream types" },
-    { "copy_unknown",           OPT_TYPE_BOOL, OPT_EXPERT,
-        {              &copy_unknown_streams },
+    { "copy_unknown",           OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        {            .off = OFFSET(copy_unknown_streams) },
         "Copy unknown stream types" },
-    { "recast_media",           OPT_TYPE_BOOL, OPT_EXPERT,
-        {              &recast_media },
+    { "recast_media",           OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        {            .off =    OFFSET(recast_media) },
         "allow recasting stream type in order to force a decoder of different media type" },
     { "c",                      OPT_TYPE_STRING, OPT_PERSTREAM | OPT_INPUT | OPT_OUTPUT | OPT_DECODER | OPT_HAS_CANON,
         { .off       = OFFSET(codec_names) },
@@ -1703,26 +1760,26 @@ const OptionDef options[] = {
         { .func_arg = opt_data_frames },
         "set the number of data frames to output", "number",
         .u1.name_canon = "frames" },
-    { "benchmark",              OPT_TYPE_BOOL, OPT_EXPERT,
-        { &do_benchmark },
+    { "benchmark",              OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(do_benchmark) },
         "add timings for benchmarking" },
-    { "benchmark_all",          OPT_TYPE_BOOL, OPT_EXPERT,
-        { &do_benchmark_all },
+    { "benchmark_all",          OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(do_benchmark_all) },
       "add timings for each task" },
     { "progress",               OPT_TYPE_FUNC, OPT_FUNC_ARG | OPT_EXPERT,
         { .func_arg = opt_progress },
       "write program-readable progress information", "url" },
-    { "stdin",                  OPT_TYPE_BOOL, OPT_EXPERT,
-        { &stdin_interaction },
+    { "stdin",                  OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(stdin_interaction) },
       "enable or disable interaction on standard input" },
     { "timelimit",              OPT_TYPE_FUNC, OPT_FUNC_ARG | OPT_EXPERT,
         { .func_arg = opt_timelimit },
         "set max runtime in seconds in CPU user time", "limit" },
-    { "dump",                   OPT_TYPE_BOOL, OPT_EXPERT,
-        { &do_pkt_dump },
+    { "dump",                   OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(do_pkt_dump) },
         "dump each input packet" },
-    { "hex",                    OPT_TYPE_BOOL, OPT_EXPERT,
-        { &do_hex_dump },
+    { "hex",                    OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(do_hex_dump) },
         "when dumping packets, also dump the payload" },
     { "re",                     OPT_TYPE_BOOL, OPT_EXPERT | OPT_OFFSET | OPT_INPUT,
         { .off = OFFSET(rate_emu) },
@@ -1740,17 +1797,17 @@ const OptionDef options[] = {
         { .func_arg = opt_target },
         "specify target file type (\"vcd\", \"svcd\", \"dvd\", \"dv\" or \"dv50\" "
         "with optional prefixes \"pal-\", \"ntsc-\" or \"film-\")", "type" },
-    { "frame_drop_threshold",   OPT_TYPE_FLOAT, OPT_EXPERT,
-        { &frame_drop_threshold },
+    { "frame_drop_threshold",   OPT_TYPE_FLOAT, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(frame_drop_threshold) },
         "frame drop threshold", "" },
-    { "copyts",                 OPT_TYPE_BOOL, OPT_EXPERT,
-        { &copy_ts },
+    { "copyts",                 OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(copy_ts) },
         "copy timestamps" },
-    { "start_at_zero",          OPT_TYPE_BOOL, OPT_EXPERT,
-        { &start_at_zero },
+    { "start_at_zero",          OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(start_at_zero) },
         "shift input timestamps to start at 0 when using copyts" },
-    { "copytb",                 OPT_TYPE_INT, OPT_EXPERT,
-        { &copy_tb },
+    { "copytb",                 OPT_TYPE_INT, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(copy_tb) },
         "copy input stream time base when stream copying", "mode" },
     { "shortest",               OPT_TYPE_BOOL, OPT_EXPERT | OPT_OFFSET | OPT_OUTPUT,
         { .off = OFFSET(shortest) },
@@ -1761,14 +1818,14 @@ const OptionDef options[] = {
     { "bitexact",               OPT_TYPE_BOOL, OPT_EXPERT | OPT_OFFSET | OPT_OUTPUT | OPT_INPUT,
         { .off = OFFSET(bitexact) },
         "bitexact mode" },
-    { "dts_delta_threshold",    OPT_TYPE_FLOAT, OPT_EXPERT,
-        { &dts_delta_threshold },
+    { "dts_delta_threshold",    OPT_TYPE_FLOAT, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(dts_delta_threshold) },
         "timestamp discontinuity delta threshold", "threshold" },
-    { "dts_error_threshold",    OPT_TYPE_FLOAT, OPT_EXPERT,
-        { &dts_error_threshold },
+    { "dts_error_threshold",    OPT_TYPE_FLOAT, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(dts_error_threshold) },
         "timestamp error delta threshold", "threshold" },
-    { "xerror",                 OPT_TYPE_BOOL, OPT_EXPERT,
-        { &exit_on_error },
+    { "xerror",                 OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(exit_on_error) },
         "exit on error", "error" },
     { "abort_on",               OPT_TYPE_FUNC, OPT_FUNC_ARG | OPT_EXPERT,
         { .func_arg = opt_abort_on },
@@ -1805,8 +1862,8 @@ const OptionDef options[] = {
     { "filter_threads",         OPT_TYPE_FUNC, OPT_FUNC_ARG | OPT_EXPERT,
         { .func_arg = opt_filter_threads },
         "number of non-complex filter threads" },
-    { "filter_buffered_frames", OPT_TYPE_INT, OPT_EXPERT,
-        { &filter_buffered_frames },
+    { "filter_buffered_frames", OPT_TYPE_INT, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(filter_buffered_frames) },
         "maximum number of buffered frames in a filter graph" },
 #if FFMPEG_OPT_FILTER_SCRIPT
     { "filter_script",          OPT_TYPE_STRING, OPT_PERSTREAM | OPT_EXPERT | OPT_OUTPUT,
@@ -1822,8 +1879,8 @@ const OptionDef options[] = {
     { "filter_complex",         OPT_TYPE_FUNC, OPT_FUNC_ARG | OPT_EXPERT,
         { .func_arg = opt_filter_complex },
         "create a complex filtergraph", "graph_description" },
-    { "filter_complex_threads", OPT_TYPE_INT, OPT_EXPERT,
-        { &filter_complex_nbthreads },
+    { "filter_complex_threads", OPT_TYPE_INT, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(filter_complex_nbthreads) },
         "number of threads for -filter_complex" },
     { "lavfi",               OPT_TYPE_FUNC, OPT_FUNC_ARG | OPT_EXPERT,
         { .func_arg = opt_filter_complex },
@@ -1833,20 +1890,20 @@ const OptionDef options[] = {
         { .func_arg = opt_filter_complex_script },
         "deprecated, use -/filter_complex instead", "filename" },
 #endif
-    { "print_graphs",   OPT_TYPE_BOOL, 0,
-        { &print_graphs },
+    { "print_graphs",   OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(print_graphs) },
         "print execution graph data to stderr" },
-    { "print_graphs_file", OPT_TYPE_STRING, 0,
-        { &print_graphs_file },
+    { "print_graphs_file", OPT_TYPE_STRING, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(print_graphs_file) },
         "write execution graph data to the specified file", "filename" },
-    { "print_graphs_format", OPT_TYPE_STRING, 0,
-        { &print_graphs_format },
+    { "print_graphs_format", OPT_TYPE_STRING, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(print_graphs_format) },
       "set the output printing format (available formats are: default, compact, csv, flat, ini, json, xml, mermaid, mermaidhtml)", "format" },
-    { "auto_conversion_filters", OPT_TYPE_BOOL, OPT_EXPERT,
-        { &auto_conversion_filters },
+    { "auto_conversion_filters", OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(auto_conversion_filters) },
         "enable automatic conversion filters globally" },
-    { "stats",               OPT_TYPE_BOOL, 0,
-        { &print_stats },
+    { "stats",               OPT_TYPE_BOOL,  OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(print_stats) },
         "print progress report during encoding", },
     { "stats_period",        OPT_TYPE_FUNC, OPT_FUNC_ARG | OPT_EXPERT,
         { .func_arg = opt_stats_period },
@@ -1859,11 +1916,11 @@ const OptionDef options[] = {
         "extract an attachment into a file", "filename" },
     { "stream_loop",         OPT_TYPE_INT, OPT_EXPERT | OPT_INPUT | OPT_OFFSET,
         { .off = OFFSET(loop) }, "set number of times input stream shall be looped", "loop count" },
-    { "debug_ts",            OPT_TYPE_BOOL, OPT_EXPERT,
-        { &debug_ts },
+    { "debug_ts",            OPT_TYPE_BOOL, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(debug_ts) },
         "print timestamp debugging info" },
-    { "max_error_rate",      OPT_TYPE_FLOAT, OPT_EXPERT,
-        { &max_error_rate },
+    { "max_error_rate",      OPT_TYPE_FLOAT, OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(max_error_rate) },
         "ratio of decoding errors (0.0: no errors, 1.0: 100% errors) above which ffmpeg returns an error instead of success.", "maximum error rate" },
     { "discard",             OPT_TYPE_STRING, OPT_PERSTREAM | OPT_INPUT | OPT_EXPERT,
         { .off = OFFSET(discard) },
@@ -1957,8 +2014,8 @@ const OptionDef options[] = {
     { "vstats_file",                OPT_TYPE_FUNC,   OPT_VIDEO | OPT_FUNC_ARG | OPT_EXPERT,
         { .func_arg = opt_vstats_file },
         "dump video coding statistics to file", "file" },
-    { "vstats_version",             OPT_TYPE_INT,    OPT_VIDEO | OPT_EXPERT,
-        { &vstats_version },
+    { "vstats_version",             OPT_TYPE_INT,    OPT_VIDEO | OPT_EXPERT | OPT_FLAG_OFFSET,
+        { .off = OFFSET(vstats_version) },
         "Version of the vstats format to use."},
     { "vf",                         OPT_TYPE_FUNC,   OPT_VIDEO | OPT_FUNC_ARG | OPT_PERFILE | OPT_OUTPUT | OPT_HAS_CANON,
         { .func_arg = opt_video_filters },

@@ -12,6 +12,7 @@ ALLAVPROGS_G = $(AVBASENAMES:%=%$(PROGSSUF)_g$(EXESUF))
 include $(SRC_PATH)/fftools/resources/Makefile
 
 OBJS-ffmpeg +=                  \
+    fftools/ffmpeg_jni.o        \
     fftools/ffmpeg_dec.o        \
     fftools/ffmpeg_demux.o      \
     fftools/ffmpeg_enc.o        \

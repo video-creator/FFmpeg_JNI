@@ -37,7 +37,7 @@
 #include "libavutil/log.h"
 #include "libavutil/pixfmt.h"
 #include "libavutil/rational.h"
-
+#include "codec_desc.h"
 #include "codec.h"
 #include "codec_id.h"
 #include "defs.h"
