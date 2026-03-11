@@ -130,6 +130,7 @@ typedef struct AVTextFormatOptions {
     AVTextFormatDataDump data_dump_format;
 } AVTextFormatOptions;
 
+typedef struct GlobalParams GlobalParams;
 struct AVTextFormatContext {
     const AVClass *class;              ///< class of the formatter
     const AVTextFormatter *formatter;  ///< the AVTextFormatter of which this is an instance
@@ -159,6 +160,7 @@ struct AVTextFormatContext {
     int string_validation;
     char *string_validation_replacement;
     unsigned int string_validation_utf8_flags;
+    GlobalParams *ffprobe_global_params;
 };
 
 #define AV_TEXTFORMAT_PRINT_STRING_OPTIONAL 1
