@@ -418,11 +418,10 @@ struct FFPlayGlobalParams {
     SDL_AudioDeviceID audio_dev;
 
     VkRenderer* vk_renderer;
-    int hide_banner;
-    AVDictionary *sws_dict;
-    AVDictionary *swr_opts;
-    AVDictionary *format_opts, *codec_opts;
+    
     int dummy;
+    FFGlobalParam *all_params;
+    int hide_banner;
 };
 
 typedef struct Decoder {
@@ -2115,7 +2114,7 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
         }
     }
 
-    while ((e = av_dict_iterate(is->global_params->sws_dict, e))) {
+    while ((e = av_dict_iterate(is->global_params->all_params->sws_dict, e))) {
         if (!strcmp(e->key, "sws_flags")) {
             av_strlcatf(sws_flags_str, sizeof(sws_flags_str), "%s=%s:", "flags", e->value);
         } else
@@ -2258,7 +2257,7 @@ static int configure_audio_filters(VideoState *is, const char *afilters, int for
 
     av_bprint_init(&bp, 0, AV_BPRINT_SIZE_AUTOMATIC);
 
-    while ((e = av_dict_iterate(is->global_params->swr_opts, e)))
+    while ((e = av_dict_iterate(is->global_params->all_params->swr_opts, e)))
         av_strlcatf(aresample_swr_opts, sizeof(aresample_swr_opts), "%s=%s:", e->key, e->value);
     if (strlen(aresample_swr_opts))
         aresample_swr_opts[strlen(aresample_swr_opts)-1] = '\0';
@@ -2929,7 +2928,7 @@ static int stream_component_open(VideoState *is, int stream_index)
     if (is->global_params->fast)
         avctx->flags2 |= AV_CODEC_FLAG2_FAST;
 
-    ret = filter_codec_opts(is->global_params->codec_opts, avctx->codec_id, ic,
+    ret = filter_codec_opts(is->global_params->all_params->codec_opts, avctx->codec_id, ic,
                             ic->streams[stream_index], codec, &opts, NULL);
     if (ret < 0)
         goto fail;
@@ -3104,21 +3103,21 @@ static int read_thread(void *arg)
     }
     ic->interrupt_callback.callback = decode_interrupt_cb;
     ic->interrupt_callback.opaque = is;
-    if (!av_dict_get(is->global_params->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
-        av_dict_set(&is->global_params->format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
+    if (!av_dict_get(is->global_params->all_params->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
+        av_dict_set(&is->global_params->all_params->format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
         scan_all_pmts_set = 1;
     }
-    err = avformat_open_input(&ic, is->filename, is->iformat, &is->global_params->format_opts);
+    err = avformat_open_input(&ic, is->filename, is->iformat, &is->global_params->all_params->format_opts);
     if (err < 0) {
         print_error(is->filename, err);
         ret = err;
         goto fail;
     }
     if (scan_all_pmts_set)
-        av_dict_set(&is->global_params->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
-    remove_avoptions(&is->global_params->format_opts, is->global_params->codec_opts);
+        av_dict_set(&is->global_params->all_params->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
+    remove_avoptions(&is->global_params->all_params->format_opts, is->global_params->all_params->codec_opts);
 
-    ret = check_avoptions(is->global_params->format_opts);
+    ret = check_avoptions(is->global_params->all_params->format_opts);
     if (ret < 0)
         goto fail;
     is->ic = ic;
@@ -3130,7 +3129,7 @@ static int read_thread(void *arg)
         AVDictionary **opts;
         int orig_nb_streams = ic->nb_streams;
 
-        err = setup_find_stream_info_opts(ic, is->global_params->codec_opts, &opts);
+        err = setup_find_stream_info_opts(ic, is->global_params->all_params->codec_opts, &opts);
         if (err < 0) {
             av_log(NULL, AV_LOG_ERROR,
                    "Error setting up avformat_find_stream_info() options\n");
@@ -4208,6 +4207,33 @@ void show_help_default(const char *opt, const char *arg)
            "left double-click   toggle full screen\n"
            );
 }
+/* Helper: allocate and populate FFPlayGlobalParams with defaults */
+static FFPlayGlobalParams *alloc_default_params(void)
+{
+    FFPlayGlobalParams *p = av_mallocz(sizeof(FFPlayGlobalParams));
+    if (!p) return NULL;
+    p->all_params = av_mallocz(sizeof(FFGlobalParam));
+    p->default_width       = 640;
+    p->default_height      = 480;
+    p->screen_left         = SDL_WINDOWPOS_CENTERED;
+    p->screen_top          = SDL_WINDOWPOS_CENTERED;
+    p->seek_by_bytes       = -1;
+    p->seek_interval       = 10;
+    p->startup_volume      = 100;
+    p->show_status         = -1;
+    p->av_sync_type        = AV_SYNC_AUDIO_MASTER;
+    p->start_time          = AV_NOPTS_VALUE;
+    p->duration            = AV_NOPTS_VALUE;
+    p->decoder_reorder_pts = -1;
+    p->loop                = 1;
+    p->framedrop           = -1;
+    p->infinite_buffer     = -1;
+    p->show_mode           = SHOW_MODE_NONE;
+    p->autorotate          = 1;
+    p->find_stream_info    = 1;
+    p->rdftspeed           = 0.02;
+    return p;
+}
 
 /* Called from the main */
 int ffplay(int argc, const char **argv)
@@ -4216,29 +4242,7 @@ int ffplay(int argc, const char **argv)
     VideoState *is;
 
     init_dynload();
-    FFPlayGlobalParams *global_params = av_mallocz(sizeof(FFPlayGlobalParams));
-    if (!global_params) {
-        av_log(NULL, AV_LOG_FATAL, "Could not allocate global params\n");
-        return AVERROR(ENOMEM);
-    }
-    global_params->default_width = 640;
-    global_params->default_height = 480;
-    global_params->screen_left = SDL_WINDOWPOS_CENTERED;
-    global_params->screen_top = SDL_WINDOWPOS_CENTERED;
-    global_params->seek_by_bytes = -1;
-    global_params->seek_interval = 10;
-    global_params->startup_volume = 100;
-    global_params->show_status = -1;
-    global_params->av_sync_type = AV_SYNC_AUDIO_MASTER;
-    global_params->start_time = AV_NOPTS_VALUE;
-    global_params->duration = AV_NOPTS_VALUE;
-    global_params->decoder_reorder_pts = -1;
-    global_params->loop = 1;
-    global_params->framedrop = -1;
-    global_params->infinite_buffer = -1;
-    global_params->show_mode = SHOW_MODE_NONE;
-    global_params->autorotate = 1;
-    global_params->find_stream_info = 1;
+    FFPlayGlobalParams *global_params = alloc_default_params();
     av_log_set_flags(AV_LOG_SKIP_REPEATED);
     parse_loglevel(argc, argv, options, &global_params);
 
@@ -4686,32 +4690,6 @@ static void player_sdl_unref(void)
     }
 }
 
-/* Helper: allocate and populate FFPlayGlobalParams with defaults */
-static FFPlayGlobalParams *alloc_default_params(void)
-{
-    FFPlayGlobalParams *p = av_mallocz(sizeof(FFPlayGlobalParams));
-    if (!p) return NULL;
-    p->default_width       = 640;
-    p->default_height      = 480;
-    p->screen_left         = SDL_WINDOWPOS_CENTERED;
-    p->screen_top          = SDL_WINDOWPOS_CENTERED;
-    p->seek_by_bytes       = -1;
-    p->seek_interval       = 10;
-    p->startup_volume      = 100;
-    p->show_status         = -1;
-    p->av_sync_type        = AV_SYNC_AUDIO_MASTER;
-    p->start_time          = AV_NOPTS_VALUE;
-    p->duration            = AV_NOPTS_VALUE;
-    p->decoder_reorder_pts = -1;
-    p->loop                = 1;
-    p->framedrop           = -1;
-    p->infinite_buffer     = -1;
-    p->show_mode           = SHOW_MODE_NONE;
-    p->autorotate          = 1;
-    p->find_stream_info    = 1;
-    p->rdftspeed           = 0.02;
-    return p;
-}
 
 /* Helper: create SDL window + renderer for the given params */
 static int player_create_window(FFPlayGlobalParams *p)
@@ -5094,6 +5072,9 @@ int ffplay_player_is_eof(FFPlayer *player)
 {
     if (!player || !player->is) return 1;
     VideoState *is = player->is;
+    /* If aborting (user quit, startup failed, etc.), consider it EOF */
+    if (is->abort_request)
+        return 1;
     return is->eof &&
            (!is->audio_st || (is->auddec.finished == is->audioq.serial &&
                                frame_queue_nb_remaining(&is->sampq) == 0)) &&
@@ -5137,7 +5118,7 @@ void ffplay_player_destroy(FFPlayer *player)
             if (p->renderer) { SDL_DestroyRenderer(p->renderer); p->renderer = NULL; }
             if (p->vk_renderer) { vk_renderer_destroy(p->vk_renderer); p->vk_renderer = NULL; }
             if (p->window)   { SDL_DestroyWindow(p->window);   p->window   = NULL; }
-            uninit_opts(p);
+            uninit_opts(p->all_params);
             for (int i = 0; i < p->nb_vfilters; i++)
                 av_freep(&p->vfilters_list[i]);
             av_freep(&p->vfilters_list);

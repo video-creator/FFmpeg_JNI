@@ -23,8 +23,8 @@
 
 #include "fftools/ffmpeg.h"
 
-int print_filtergraphs(FilterGraph **graphs, int nb_graphs, InputFile **ifiles, int nb_ifiles, OutputFile **ofiles, int nb_ofiles, FFGlobalParam *global_param);
+int print_filtergraphs(FilterGraph **graphs, int nb_graphs, InputFile **ifiles, int nb_ifiles, OutputFile **ofiles, int nb_ofiles, FFmpegTranscoder *global_param);
 
-int print_filtergraph(FilterGraph *fg, AVFilterGraph *graph, FFGlobalParam *global_param);
+int print_filtergraph(FilterGraph *fg, AVFilterGraph *graph, FFmpegTranscoder *global_param);
 
 #endif /* FFTOOLS_GRAPH_GRAPHPRINT_H */

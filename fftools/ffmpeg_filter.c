@@ -65,7 +65,7 @@ typedef struct FilterGraphPriv {
 
     Scheduler       *sch;
     unsigned         sch_idx;
-    struct FFGlobalParam *global_param;
+    struct FFmpegTranscoder *transcoder;
 } FilterGraphPriv;
 
 static FilterGraphPriv *fgp_from_fg(FilterGraph *fg)
@@ -442,12 +442,12 @@ static void choose_channel_layouts(OutputFilterPriv *ofp, AVBPrint *bprint)
 }
 
 static int read_binary(void *logctx, const char *path,
-                       uint8_t **data, int *len, FFGlobalParam *global_param)
+                       uint8_t **data, int *len, FFmpegTranscoder *transcoder)
 {
     AVIOContext *io = NULL;
     int64_t fsize;
     int ret;
-
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     *data = NULL;
     *len  = 0;
 
@@ -491,11 +491,11 @@ fail:
 }
 
 static int filter_opt_apply(void *logctx, AVFilterContext *f,
-                            const char *key, const char *val, FFGlobalParam *global_param)
+                            const char *key, const char *val, FFmpegTranscoder *transcoder)
 {
     const AVOption *o = NULL;
     int ret;
-
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     ret = av_opt_set(f, key, val, AV_OPT_SEARCH_CHILDREN);
     if (ret >= 0)
         return 0;
@@ -546,8 +546,9 @@ err_load:
     return ret;
 }
 
-static int graph_opts_apply(void *logctx, AVFilterGraphSegment *seg, FFGlobalParam *global_param)
+static int graph_opts_apply(void *logctx, AVFilterGraphSegment *seg, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     for (size_t i = 0; i < seg->nb_chains; i++) {
         AVFilterChain *ch = seg->chains[i];
 
@@ -573,11 +574,11 @@ static int graph_opts_apply(void *logctx, AVFilterGraphSegment *seg, FFGlobalPar
 static int graph_parse(void *logctx,
                        AVFilterGraph *graph, const char *desc,
                        AVFilterInOut **inputs, AVFilterInOut **outputs,
-                       AVBufferRef *hw_device, FFGlobalParam *global_param)
+                       AVBufferRef *hw_device, FFmpegTranscoder *transcoder)
 {
     AVFilterGraphSegment *seg;
     int ret;
-
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     *inputs  = NULL;
     *outputs = NULL;
 
@@ -1087,8 +1088,9 @@ static const AVClass fg_class = {
 };
 
 int fg_create(FilterGraph **pfg, char **graph_desc, Scheduler *sch,
-              const OutputFilterOptions *opts, FFGlobalParam *global_param)
+              const OutputFilterOptions *opts, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     FilterGraphPriv *fgp;
     FilterGraph      *fg;
 
@@ -1102,7 +1104,7 @@ int fg_create(FilterGraph **pfg, char **graph_desc, Scheduler *sch,
         return AVERROR(ENOMEM);
     }
     fg = &fgp->fg;
-    fgp->global_param = global_param;
+    fgp->transcoder = transcoder;
     if (pfg) {
         *pfg = fg;
         fg->index = -1;
@@ -1250,13 +1252,14 @@ int fg_create_simple(FilterGraph **pfg,
                      InputStream *ist,
                      char **graph_desc,
                      Scheduler *sch, unsigned sched_idx_enc,
-                     const OutputFilterOptions *opts, FFGlobalParam *global_param)
+                     const OutputFilterOptions *opts, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     const enum AVMediaType type = ist->par->codec_type;
     FilterGraph *fg;
     FilterGraphPriv *fgp;
     int ret;
-    ist->global_param = global_param;
+    ist->transcoder = transcoder;
     ret = fg_create(pfg, graph_desc, sch, NULL, global_param);
     if (ret < 0)
         return ret;
@@ -1298,8 +1301,9 @@ int fg_create_simple(FilterGraph **pfg,
     return 0;
 }
 
-static int fg_complex_bind_input(FilterGraph *fg, InputFilter *ifilter, int commit, FFGlobalParam *global_param)
+static int fg_complex_bind_input(FilterGraph *fg, InputFilter *ifilter, int commit, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     InputFilterPriv *ifp = ifp_from_ifilter(ifilter);
     InputStream *ist = NULL;
     enum AVMediaType type = ifilter->type;
@@ -1471,8 +1475,9 @@ static int fg_complex_bind_input(FilterGraph *fg, InputFilter *ifilter, int comm
     return 0;
 }
 
-static int bind_inputs(FilterGraph *fg, int commit, FFGlobalParam *global_param)
+static int bind_inputs(FilterGraph *fg, int commit, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     // bind filtergraph inputs to input streams or other filtergraphs
     for (int i = 0; i < fg->nb_inputs; i++) {
         InputFilterPriv *ifp = ifp_from_ifilter(fg->inputs[i]);
@@ -1489,10 +1494,10 @@ static int bind_inputs(FilterGraph *fg, int commit, FFGlobalParam *global_param)
     return 0;
 }
 
-int fg_finalise_bindings(FFGlobalParam *global_param)
+int fg_finalise_bindings(FFmpegTranscoder *transcoder)
 {
     int ret;
-
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     for (int i = 0; i < global_param->nb_filtergraphs; i++) {
         ret = bind_inputs(global_param->filtergraphs[i], 0, global_param);
         if (ret < 0)
@@ -2062,8 +2067,9 @@ static int graph_is_meta(AVFilterGraph *graph)
 
 static int sub2video_frame(InputFilter *ifilter, AVFrame *frame, int buffer);
 
-static int configure_filtergraph(FilterGraph *fg, FilterGraphThread *fgt, FFGlobalParam *global_param)
+static int configure_filtergraph(FilterGraph *fg, FilterGraphThread *fgt, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     FilterGraphPriv *fgp = fgp_from_fg(fg);
     AVBufferRef *hw_device;
     AVFilterInOut *inputs, *outputs, *cur;
@@ -2452,8 +2458,9 @@ finish:
 }
 
 static double adjust_frame_pts_to_encoder_tb(void *logctx, AVFrame *frame,
-                                             AVRational tb_dst, int64_t start_time, FFGlobalParam *global_param)
+                                             AVRational tb_dst, int64_t start_time, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     double float_pts = AV_NOPTS_VALUE; // this is identical to frame.pts but with higher precision
 
     AVRational        tb = tb_dst;
@@ -2512,8 +2519,9 @@ static int64_t median3(int64_t a, int64_t b, int64_t c)
  * desired target framerate (if any).
  */
 static void video_sync_process(OutputFilterPriv *ofp, AVFrame *frame,
-                               int64_t *nb_frames, int64_t *nb_frames_prev, FFGlobalParam *global_param)
+                               int64_t *nb_frames, int64_t *nb_frames_prev, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     OutputFilter   *ofilter = &ofp->ofilter;
     FPSConvContext     *fps = &ofp->fps;
     double delta0, delta, sync_ipts, duration;
@@ -2701,8 +2709,9 @@ static int close_output(OutputFilterPriv *ofp, FilterGraphThread *fgt)
 }
 
 static int fg_output_frame(OutputFilterPriv *ofp, FilterGraphThread *fgt,
-                           AVFrame *frame, FFGlobalParam *global_param)
+                           AVFrame *frame, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     FilterGraphPriv  *fgp = fgp_from_fg(ofp->ofilter.graph);
     AVFrame   *frame_prev = ofp->fps.last_frame;
     enum AVMediaType type = ofp->ofilter.type;
@@ -2784,8 +2793,9 @@ static int fg_output_frame(OutputFilterPriv *ofp, FilterGraphThread *fgt,
 }
 
 static int fg_output_step(OutputFilterPriv *ofp, FilterGraphThread *fgt,
-                          AVFrame *frame, FFGlobalParam *global_param)
+                          AVFrame *frame, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     FilterGraphPriv    *fgp = fgp_from_fg(ofp->ofilter.graph);
     AVFilterContext *filter = ofp->ofilter.filter;
     FrameData *fd;
@@ -2869,8 +2879,9 @@ static int fg_output_step(OutputFilterPriv *ofp, FilterGraphThread *fgt,
 /* retrieve all frames available at filtergraph outputs
  * and send them to consumers */
 static int read_frames(FilterGraph *fg, FilterGraphThread *fgt,
-                       AVFrame *frame, FFGlobalParam *global_param)
+                       AVFrame *frame, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     FilterGraphPriv *fgp = fgp_from_fg(fg);
     int did_step = 0;
 
@@ -3001,8 +3012,9 @@ static int sub2video_frame(InputFilter *ifilter, AVFrame *frame, int buffer)
 }
 
 static int send_eof(FilterGraphThread *fgt, InputFilter *ifilter,
-                    int64_t pts, AVRational tb, FFGlobalParam *global_param)
+                    int64_t pts, AVRational tb, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     InputFilterPriv *ifp = ifp_from_ifilter(ifilter);
     int ret;
 
@@ -3077,8 +3089,9 @@ static const char *unknown_if_null(const char *str)
 }
 
 static int send_frame(FilterGraph *fg, FilterGraphThread *fgt,
-                      InputFilter *ifilter, AVFrame *frame, FFGlobalParam *global_param)
+                      InputFilter *ifilter, AVFrame *frame, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     FilterGraphPriv *fgp = fgp_from_fg(fg);
     InputFilterPriv *ifp = ifp_from_ifilter(ifilter);
     FrameData       *fd;
@@ -3310,7 +3323,7 @@ static int filter_thread(void *arg)
 
     // if we have all input parameters the graph can now be configured
     if (ifilter_has_all_input_formats(fg)) {
-        ret = configure_filtergraph(fg, &fgt, fgp->global_param);
+        ret = configure_filtergraph(fg, &fgt, fgp->transcoder->global_param);
         if (ret < 0) {
             av_log(fg, AV_LOG_ERROR, "Error configuring filter graph: %s\n",
                    av_err2str(ret));
@@ -3362,10 +3375,10 @@ static int filter_thread(void *arg)
             ret = sub2video_frame(ifilter, (fgt.frame->buf[0] || hb_frame) ? fgt.frame : NULL,
                                   !fgt.graph);
         } else if (fgt.frame->buf[0]) {
-            ret = send_frame(fg, &fgt, ifilter, fgt.frame, fgp->global_param);
+            ret = send_frame(fg, &fgt, ifilter, fgt.frame, fgp->transcoder->global_param);
         } else {
             av_assert1(o == FRAME_OPAQUE_EOF);
-            ret = send_eof(&fgt, ifilter, fgt.frame->pts, fgt.frame->time_base, fgp->global_param);
+            ret = send_eof(&fgt, ifilter, fgt.frame->pts, fgt.frame->time_base, fgp->transcoder->global_param);
         }
         av_frame_unref(fgt.frame);
         if (ret == AVERROR_EOF) {
@@ -3379,7 +3392,7 @@ static int filter_thread(void *arg)
 
 read_frames:
         // retrieve all newly available frames
-        ret = read_frames(fg, &fgt, fgt.frame, fgp->global_param);
+        ret = read_frames(fg, &fgt, fgt.frame, fgp->transcoder->global_param);
         if (ret == AVERROR_EOF) {
             av_log(fg, AV_LOG_VERBOSE, "All consumers returned EOF\n");
             if (ifp && ifp->opts.flags & IFILTER_FLAG_DROPCHANGED)
@@ -3405,15 +3418,15 @@ read_frames:
         if (fgt.eof_out[i] || !fgt.graph)
             continue;
 
-        ret = fg_output_frame(ofp, &fgt, NULL, fgp->global_param);
+        ret = fg_output_frame(ofp, &fgt, NULL, fgp->transcoder->global_param);
         if (ret < 0)
             goto finish;
     }
 
 finish:
 
-    if (fgp->global_param->print_graphs || fgp->global_param->print_graphs_file)
-        print_filtergraph(fg, fgt.graph,fgp->global_param);
+    if (fgp->transcoder->global_param->print_graphs || fgp->transcoder->global_param->print_graphs_file)
+        print_filtergraph(fg, fgt.graph,fgp->transcoder->global_param);
 
     // EOF is normal termination
     if (ret == AVERROR_EOF)

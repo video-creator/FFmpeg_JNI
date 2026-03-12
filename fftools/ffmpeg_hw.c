@@ -25,46 +25,46 @@
 // static int nb_hw_devices;
 // static HWDevice **hw_devices;
 
-HWDevice *hw_device_get_by_type(enum AVHWDeviceType type, FFGlobalParam *global_param)
+HWDevice *hw_device_get_by_type(enum AVHWDeviceType type, FFmpegTranscoder *transcoder)
 {
     HWDevice *found = NULL;
     int i;
-    for (i = 0; i < global_param->nb_hw_devices; i++) {
-        if (global_param->hw_devices[i]->type == type) {
+    for (i = 0; i < transcoder->global_param->nb_hw_devices; i++) {
+        if (transcoder->global_param->hw_devices[i]->type == type) {
             if (found)
                 return NULL;
-            found = global_param->hw_devices[i];
+            found = transcoder->global_param->hw_devices[i];
         }
     }
     return found;
 }
 
-HWDevice *hw_device_get_by_name(const char *name, FFGlobalParam *global_param)
+HWDevice *hw_device_get_by_name(const char *name, FFmpegTranscoder *transcoder)
 {
     int i;
-    for (i = 0; i < global_param->nb_hw_devices; i++) {
-        if (!strcmp(global_param->hw_devices[i]->name, name))
-            return global_param->hw_devices[i];
+    for (i = 0; i < transcoder->global_param->nb_hw_devices; i++) {
+        if (!strcmp(transcoder->global_param->hw_devices[i]->name, name))
+            return transcoder->global_param->hw_devices[i];
     }
     return NULL;
 }
 
-static HWDevice *hw_device_add(FFGlobalParam *global_param)
+static HWDevice *hw_device_add(FFmpegTranscoder *transcoder)
 {
     int err;
-    err = av_reallocp_array(&global_param->hw_devices, global_param->nb_hw_devices + 1,
-                            sizeof(*global_param->hw_devices));
+    err = av_reallocp_array(&transcoder->global_param->hw_devices, transcoder->global_param->nb_hw_devices + 1,
+                            sizeof(*transcoder->global_param->hw_devices));
     if (err) {
-        global_param->nb_hw_devices = 0;
+        transcoder->global_param->nb_hw_devices = 0;
         return NULL;
     }
-    global_param->hw_devices[global_param->nb_hw_devices] = av_mallocz(sizeof(HWDevice));
-    if (!global_param->hw_devices[global_param->nb_hw_devices])
+    transcoder->global_param->hw_devices[transcoder->global_param->nb_hw_devices] = av_mallocz(sizeof(HWDevice));
+    if (!transcoder->global_param->hw_devices[transcoder->global_param->nb_hw_devices])
         return NULL;
-    return global_param->hw_devices[global_param->nb_hw_devices++];
+    return transcoder->global_param->hw_devices[transcoder->global_param->nb_hw_devices++];
 }
 
-static char *hw_device_default_name(enum AVHWDeviceType type, FFGlobalParam *global_param)
+static char *hw_device_default_name(enum AVHWDeviceType type, FFmpegTranscoder *global_param)
 {
     // Make an automatic name of the form "type%d".  We arbitrarily
     // limit at 1000 anonymous devices of the same type - there is
@@ -89,7 +89,7 @@ static char *hw_device_default_name(enum AVHWDeviceType type, FFGlobalParam *glo
     return name;
 }
 
-int hw_device_init_from_string(const char *arg, HWDevice **dev_out, FFGlobalParam *global_param)
+int hw_device_init_from_string(const char *arg, HWDevice **dev_out, FFmpegTranscoder *global_param)
 {
     // "type=name"
     // "type=name,key=value,key2=value2"
@@ -242,7 +242,7 @@ fail:
 
 int hw_device_init_from_type(enum AVHWDeviceType type,
                              const char *device,
-                             HWDevice **dev_out, FFGlobalParam *global_param)
+                             HWDevice **dev_out, FFmpegTranscoder *global_param)
 {
     AVBufferRef *device_ref = NULL;
     HWDevice *dev;
@@ -283,33 +283,33 @@ fail:
     return err;
 }
 
-void hw_device_free_all(FFGlobalParam *global_param)
+void hw_device_free_all(FFmpegTranscoder *transcoder)
 {
     int i;
-    for (i = 0; i < global_param->nb_hw_devices; i++) {
-        av_freep(&global_param->hw_devices[i]->name);
-        av_buffer_unref(&global_param->hw_devices[i]->device_ref);
-        av_freep(&global_param->hw_devices[i]);
+    for (i = 0; i < transcoder->global_param->nb_hw_devices; i++) {
+        av_freep(&transcoder->global_param->hw_devices[i]->name);
+        av_buffer_unref(&transcoder->global_param->hw_devices[i]->device_ref);
+        av_freep(&transcoder->global_param->hw_devices[i]);
     }
-    av_freep(&global_param->hw_devices);
-    global_param->nb_hw_devices = 0;
+    av_freep(&transcoder->global_param->hw_devices);
+    transcoder->global_param->nb_hw_devices = 0;
 }
 
-AVBufferRef *hw_device_for_filter(FFGlobalParam *global_param)
+AVBufferRef *hw_device_for_filter(FFmpegTranscoder *transcoder)
 {
     // Pick the last hardware device if the user doesn't pick the device for
     // filters explicitly with the filter_hw_device option.
-    if (global_param->filter_hw_device)
-        return global_param->filter_hw_device->device_ref;
-    else if (global_param->nb_hw_devices > 0) {
-        HWDevice *dev = global_param->hw_devices[global_param->nb_hw_devices - 1];
+    if (transcoder->global_param->filter_hw_device)
+        return transcoder->global_param->filter_hw_device->device_ref;
+    else if (transcoder->global_param->nb_hw_devices > 0) {
+        HWDevice *dev = transcoder->global_param->hw_devices[transcoder->global_param->nb_hw_devices - 1];
 
-        if (global_param->nb_hw_devices > 1)
+        if (transcoder->global_param->nb_hw_devices > 1)
             av_log(NULL, AV_LOG_WARNING, "There are %d hardware devices. device "
                    "%s of type %s is picked for filters by default. Set hardware "
                    "device explicitly with the filter_hw_device option if device "
                    "%s is not usable for filters.\n",
-                   global_param->nb_hw_devices, dev->name,
+                   transcoder->global_param->nb_hw_devices, dev->name,
                    av_hwdevice_get_type_name(dev->type), dev->name);
 
         return dev->device_ref;

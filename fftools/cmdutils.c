@@ -599,6 +599,9 @@ static const AVOption *opt_find(void *obj, const char *name, const char *unit,
 int opt_default(void *optctx, const char *opt, const char *arg)
 {
     OptionsContext *oo = (OptionsContext *)optctx;
+    FFGlobalParam *global_param = NULL;
+    if (oo->transcoder) 
+        global_param = oo->transcoder->global_param->all_params;
     const AVOption *o;
     int consumed = 0;
     char opt_stripped[128];
@@ -622,12 +625,12 @@ int opt_default(void *optctx, const char *opt, const char *arg)
                          AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ)) ||
         ((opt[0] == 'v' || opt[0] == 'a' || opt[0] == 's') &&
          (o = opt_find(&cc, opt + 1, NULL, 0, AV_OPT_SEARCH_FAKE_OBJ)))) {
-        av_dict_set(&oo->global_param->codec_opts, opt, arg, FLAGS);
+        av_dict_set(&global_param->codec_opts, opt, arg, FLAGS);
         consumed = 1;
     }
     if ((o = opt_find(&fc, opt, NULL, 0,
                          AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ))) {
-        av_dict_set(&oo->global_param->format_opts, opt, arg, FLAGS);
+        av_dict_set(&global_param->format_opts, opt, arg, FLAGS);
         if (consumed)
             av_log(NULL, AV_LOG_VERBOSE, "Routing option %s to both codec and muxer layer\n", opt);
         consumed = 1;
@@ -641,7 +644,7 @@ int opt_default(void *optctx, const char *opt, const char *arg)
             av_log(NULL, AV_LOG_ERROR, "Directly using swscale dimensions/format options is not supported, please use the -s or -pix_fmt options\n");
             return AVERROR(EINVAL);
         }
-        av_dict_set(&oo->global_param->sws_dict, opt, arg, FLAGS);
+        av_dict_set(&global_param->sws_dict, opt, arg, FLAGS);
 
         consumed = 1;
     }
@@ -654,7 +657,7 @@ int opt_default(void *optctx, const char *opt, const char *arg)
 #if CONFIG_SWRESAMPLE
     if (!consumed && (o=opt_find(&swr_class, opt, NULL, 0,
                                     AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ))) {
-        av_dict_set(&oo->global_param->swr_opts, opt, arg, FLAGS);
+        av_dict_set(&global_param->swr_opts, opt, arg, FLAGS);
         consumed = 1;
     }
 #endif
@@ -746,7 +749,7 @@ static int init_parse_context(OptionParseContext *octx,
 {
     static const OptionGroupDef global_group = { "global" };
     int i;
-    FFGlobalParam *param = octx->global_param;
+    FFGlobalParam*param = octx->global_param;
     memset(octx, 0, sizeof(*octx));
     octx->global_param = param; 
     octx->groups    = av_calloc(nb_groups, sizeof(*octx->groups));

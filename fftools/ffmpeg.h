@@ -258,7 +258,7 @@ typedef struct OptionsContext {
     SpecifierOptList enc_stats_pre_fmt;
     SpecifierOptList enc_stats_post_fmt;
     SpecifierOptList mux_stats_fmt;
-    struct FFGlobalParam *global_param;
+    struct FFmpegTranscoder *transcoder;
 
 
 
@@ -574,7 +574,7 @@ typedef struct InputStream {
      * currently video and audio only */
     InputFilter         **filters;
     int                nb_filters;
-    FFGlobalParam *global_param;
+    struct FFmpegTranscoder *transcoder;
 } InputStream;
 
 typedef struct InputStreamGroup {
@@ -700,7 +700,7 @@ typedef struct Encoder {
     // number of frames/samples sent to the encoder
     uint64_t                frames_encoded;
     uint64_t                samples_encoded;
-    struct FFGlobalParam *global_param;
+    struct FFmpegTranscoder *transcoder;
 } Encoder;
 
 enum CroppingType {
@@ -873,7 +873,8 @@ typedef struct BenchmarkTimeStamps {
 
 // extern FILE *vstats_file;
 
-typedef struct FFGlobalParam {
+typedef struct FFmpegGlobalParam {
+    FFGlobalParam *all_params; //ffmpeg/ffprobe/ffplay
     InputFile** input_files;
     int nb_input_files;
 
@@ -949,12 +950,20 @@ typedef struct FFGlobalParam {
     int nb_hw_devices;
     HWDevice **hw_devices;
     
-} FFGlobalParam;
+} FFmpegGlobalParam;
 
-extern _Thread_local FFGlobalParam global_param;
+typedef struct FFmpegTranscoder
+{
+    FFmpegGlobalParam *global_param;
+} FFmpegTranscoder;
+
+FFmpegTranscoder * ffmpeg_transcoder_init(void);
+void ffmpeg_transcoder_run(FFmpegTranscoder *transcoder,int argc, const char **argv);
+void ffmpeg_transcoder_deinit(FFmpegTranscoder *transcoder);
+
 extern const OptionDef options[];
 
-void term_init(FFGlobalParam *g);
+void term_init(FFmpegTranscoder *g);
 void term_exit(void);
 
 void show_usage(void);
@@ -962,18 +971,18 @@ void show_usage(void);
 int check_avoptions_used(const AVDictionary *opts, const AVDictionary *opts_used,
                          void *logctx, int decode);
 
-int assert_file_overwrite(const char *filename, FFGlobalParam *global_param);
+int assert_file_overwrite(const char *filename, FFmpegTranscoder *transcoder);
 int find_codec(void *logctx, const char *name,
-               enum AVMediaType type, int encoder, const AVCodec **codec, FFGlobalParam *global_param);
-int parse_and_set_vsync(const char *arg, enum VideoSyncMethod *vsync_var, int file_idx, int st_idx, int is_global, FFGlobalParam *global_param);
+               enum AVMediaType type, int encoder, const AVCodec **codec, FFmpegTranscoder *transcoder);
+int parse_and_set_vsync(const char *arg, enum VideoSyncMethod *vsync_var, int file_idx, int st_idx, int is_global, FFmpegTranscoder *transcoder);
 
 int filtergraph_is_simple(const FilterGraph *fg);
 int fg_create_simple(FilterGraph **pfg,
                      InputStream *ist,
                      char **graph_desc,
                      Scheduler *sch, unsigned sched_idx_enc,
-                     const OutputFilterOptions *opts, FFGlobalParam *global_param);
-int fg_finalise_bindings(FFGlobalParam *global_param);
+                     const OutputFilterOptions *opts, FFmpegTranscoder *transcoder);
+int fg_finalise_bindings(FFmpegTranscoder *transcoder);
 
 /**
  * Get our axiliary frame data attached to the frame, allocating it
@@ -997,33 +1006,33 @@ int ofilter_bind_enc(OutputFilter *ofilter,
  *                   takes ownership of it.
  */
 int fg_create(FilterGraph **pfg, char **graph_desc, Scheduler *sch,
-              const OutputFilterOptions *opts, FFGlobalParam *global_param);
+              const OutputFilterOptions *opts, FFmpegTranscoder *globtral_param);
 
 void fg_free(FilterGraph **pfg);
 
 void fg_send_command(FilterGraph *fg, double time, const char *target,
                      const char *command, const char *arg, int all_filters);
 
-int ffmpeg_parse_options(int argc, char **argv, Scheduler *sch, FFGlobalParam *global_param);
+int ffmpeg_parse_options(int argc, char **argv, Scheduler *sch, FFmpegTranscoder *transcoder);
 
 void enc_stats_write(OutputStream *ost, EncStats *es,
                      const AVFrame *frame, const AVPacket *pkt,
                      uint64_t frame_num);
 
-HWDevice *hw_device_get_by_name(const char *name, FFGlobalParam *global_param);
-HWDevice *hw_device_get_by_type(enum AVHWDeviceType type, FFGlobalParam *global_param);
-int hw_device_init_from_string(const char *arg, HWDevice **dev, FFGlobalParam *global_param);
+HWDevice *hw_device_get_by_name(const char *name, FFmpegTranscoder *transcoder);
+HWDevice *hw_device_get_by_type(enum AVHWDeviceType type, FFmpegTranscoder *transcoder);
+int hw_device_init_from_string(const char *arg, HWDevice **dev, FFmpegTranscoder *transcoder);
 int hw_device_init_from_type(enum AVHWDeviceType type,
                              const char *device,
-                             HWDevice **dev_out, FFGlobalParam *global_param);
-void hw_device_free_all(FFGlobalParam *global_param);
+                             HWDevice **dev_out, FFmpegTranscoder *transcoder);
+void hw_device_free_all(FFmpegTranscoder *transcoder);
 
 /**
  * Get a hardware device to be used with this filtergraph.
  * The returned reference is owned by the callee, the caller
  * must ref it explicitly for long-term use.
  */
-AVBufferRef *hw_device_for_filter(FFGlobalParam *global_param);
+AVBufferRef *hw_device_for_filter(FFmpegTranscoder *transcoder);
 
 /**
  * Create a standalone decoder.
@@ -1041,7 +1050,7 @@ int dec_create(const OptionsContext *o, const char *arg, Scheduler *sch);
  */
 int dec_init(Decoder **pdec, Scheduler *sch,
              AVDictionary **dec_opts, const DecoderOpts *o,
-             AVFrame *param_out, FFGlobalParam *global_param);
+             AVFrame *param_out, FFmpegTranscoder *transcoder);
 void dec_free(Decoder **pdec);
 
 /*
@@ -1066,7 +1075,7 @@ int dec_request_view(Decoder *dec, const ViewSpecifier *vs,
                      SchedulerNode *src);
 
 int enc_alloc(Encoder **penc, const AVCodec *codec,
-              Scheduler *sch, unsigned sch_idx, void *log_parent, FFGlobalParam *global_param);
+              Scheduler *sch, unsigned sch_idx, void *log_parent, FFmpegTranscoder *transcoder);
 void enc_free(Encoder **penc);
 
 int enc_open(void *opaque, const AVFrame *frame);
@@ -1101,17 +1110,17 @@ int ist_filter_add(InputStream *ist, InputFilter *ifilter, int is_simple,
 /**
  * Find an unused input stream of given type.
  */
-InputStream *ist_find_unused(enum AVMediaType type, FFGlobalParam *global_param);
+InputStream *ist_find_unused(enum AVMediaType type, FFmpegTranscoder *transcoder);
 
 /* iterate over all input streams in all input files;
  * pass NULL to start iteration */
-InputStream *ist_iter(InputStream *prev, FFGlobalParam *global_param);
+InputStream *ist_iter(InputStream *prev, FFmpegTranscoder *transcoder);
 
 /* iterate over all output streams in all output files;
  * pass NULL to start iteration */
-OutputStream *ost_iter(OutputStream *prev, FFGlobalParam *global_param);
+OutputStream *ost_iter(OutputStream *prev, FFmpegTranscoder *transcoder);
 
-void update_benchmark(FFGlobalParam *global_param, const char *fmt, ...);
+void update_benchmark(FFmpegTranscoder *transcoder, const char *fmt, ...);
 
 const char *opt_match_per_type_str(const SpecifierOptList *sol,
                                    char mediatype);

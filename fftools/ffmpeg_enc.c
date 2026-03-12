@@ -97,7 +97,7 @@ static const AVClass enc_class = {
 };
 
 int enc_alloc(Encoder **penc, const AVCodec *codec,
-              Scheduler *sch, unsigned sch_idx, void *log_parent, FFGlobalParam *global_param)
+              Scheduler *sch, unsigned sch_idx, void *log_parent, FFmpegTranscoder *transcoder)
 {
     EncoderPriv *ep;
     int ret = 0;
@@ -123,7 +123,7 @@ int enc_alloc(Encoder **penc, const AVCodec *codec,
     }
 
     *penc = &ep->e;
-    ep->e.global_param = global_param;
+    ep->e.transcoder = transcoder;
     return 0;
 fail:
     enc_free((Encoder**)&ep);
@@ -165,7 +165,7 @@ static int hw_device_setup_for_encode(Encoder *e, AVCodecContext *enc_ctx,
 
         if (!dev &&
             config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)
-            dev = hw_device_get_by_type(config->device_type, e->global_param);
+            dev = hw_device_get_by_type(config->device_type, e->transcoder->global_param);
     }
 
     if (dev) {
@@ -388,7 +388,7 @@ static int do_subtitle_out(OutputFile *of, OutputStream *ost, const AVSubtitle *
 
     if (sub->pts == AV_NOPTS_VALUE) {
         av_log(e, AV_LOG_ERROR, "Subtitle packets must have a pts\n");
-        return e->global_param->exit_on_error ? AVERROR(EINVAL) : 0;
+        return e->transcoder->global_param->exit_on_error ? AVERROR(EINVAL) : 0;
     }
     if ((of->start_time != AV_NOPTS_VALUE && sub->pts < of->start_time))
         return 0;
@@ -572,28 +572,28 @@ static int update_video_stats(OutputStream *ost, const AVPacket *pkt, int write_
         return 0;
 
     /* this is executed just the first time update_video_stats is called */
-    if (!e->global_param->vstats_file) {
-        e->global_param->vstats_file = fopen(e->global_param->vstats_filename, "w");
-        if (!e->global_param->vstats_file) {
+    if (!e->transcoder->global_param->vstats_file) {
+        e->transcoder->global_param->vstats_file = fopen(e->transcoder->global_param->vstats_filename, "w");
+        if (!e->transcoder->global_param->vstats_file) {
             perror("fopen");
             return AVERROR(errno);
         }
     }
 
     frame_number = ep->packets_encoded;
-    if (e->global_param->vstats_version <= 1) {
-        fprintf(e->global_param->vstats_file, "frame= %5"PRId64" q= %2.1f ", frame_number,
+    if (e->transcoder->global_param->vstats_version <= 1) {
+        fprintf(e->transcoder->global_param->vstats_file, "frame= %5"PRId64" q= %2.1f ", frame_number,
                 quality / (float)FF_QP2LAMBDA);
     } else  {
-        fprintf(e->global_param->vstats_file, "out= %2d st= %2d frame= %5"PRId64" q= %2.1f ",
+        fprintf(e->transcoder->global_param->vstats_file, "out= %2d st= %2d frame= %5"PRId64" q= %2.1f ",
                 ost->file->index, ost->index, frame_number,
                 quality / (float)FF_QP2LAMBDA);
     }
 
     if (psnr_val >= 0)
-        fprintf(e->global_param->vstats_file, "PSNR= %6.2f ", psnr_val);
+        fprintf(e->transcoder->global_param->vstats_file, "PSNR= %6.2f ", psnr_val);
 
-    fprintf(e->global_param->vstats_file,"f_size= %6d ", pkt->size);
+    fprintf(e->transcoder->global_param->vstats_file,"f_size= %6d ", pkt->size);
     /* compute pts value */
     ti1 = pkt->dts * av_q2d(pkt->time_base);
     if (ti1 < 0.01)
@@ -601,9 +601,9 @@ static int update_video_stats(OutputStream *ost, const AVPacket *pkt, int write_
 
     bitrate     = (pkt->size * 8) / av_q2d(enc->time_base) / 1000.0;
     avg_bitrate = (double)(ep->data_size * 8) / ti1 / 1000.0;
-    fprintf(e->global_param->vstats_file, "s_size= %8.0fKiB time= %0.3f br= %7.1fkbits/s avg_br= %7.1fkbits/s ",
+    fprintf(e->transcoder->global_param->vstats_file, "s_size= %8.0fKiB time= %0.3f br= %7.1fkbits/s avg_br= %7.1fkbits/s ",
            (double)ep->data_size / 1024, ti1, bitrate, avg_bitrate);
-    fprintf(e->global_param->vstats_file, "type= %c\n", av_get_picture_type_char(pict_type));
+    fprintf(e->transcoder->global_param->vstats_file, "type= %c\n", av_get_picture_type_char(pict_type));
 
     return 0;
 }
@@ -633,7 +633,7 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame,
         e->frames_encoded++;
         e->samples_encoded += frame->nb_samples;
 
-        if (e->global_param->debug_ts) {
+        if (e->transcoder->global_param->debug_ts) {
             av_log(e, AV_LOG_INFO, "encoder <- type:%s "
                    "frame_pts:%s frame_pts_time:%s time_base:%d/%d\n",
                    type_desc,
@@ -645,7 +645,7 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame,
             enc->sample_aspect_ratio = frame->sample_aspect_ratio;
     }
 
-    update_benchmark(e->global_param, NULL);
+    update_benchmark(e->transcoder->global_param, NULL);
 
     ret = avcodec_send_frame(enc, frame);
     if (ret < 0 && !(ret == AVERROR_EOF && !frame)) {
@@ -660,7 +660,7 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame,
         av_packet_unref(pkt);
 
         ret = avcodec_receive_packet(enc, pkt);
-        update_benchmark(e->global_param,"%s_%s %d.%d", action, type_desc,
+        update_benchmark(e->transcoder->global_param,"%s_%s %d.%d", action, type_desc,
                          of->index, ost->index);
 
         pkt->time_base = enc->time_base;
@@ -698,7 +698,7 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame,
         pkt->flags |= AV_PKT_FLAG_TRUSTED;
 
         if (enc->codec_type == AVMEDIA_TYPE_VIDEO) {
-            ret = update_video_stats(ost, pkt, !!e->global_param->vstats_filename);
+            ret = update_video_stats(ost, pkt, !!e->transcoder->global_param->vstats_filename);
             if (ret < 0)
                 return ret;
         }
@@ -707,7 +707,7 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame,
             enc_stats_write(ost, &ost->enc_stats_post, NULL, pkt,
                             ep->packets_encoded);
 
-        if (e->global_param->debug_ts) {
+        if (e->transcoder->global_param->debug_ts) {
             av_log(e, AV_LOG_INFO, "encoder -> type:%s "
                    "pkt_pts:%s pkt_pts_time:%s pkt_dts:%s pkt_dts_time:%s "
                    "duration:%s duration_time:%s\n",

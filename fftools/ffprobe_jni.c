@@ -296,7 +296,7 @@ static const char unit_byte_str[]           = "byte" ;
 static const char unit_bit_per_second_str[] = "bit/s";
 
 
-typedef struct GlobalParams {
+typedef struct FFProbeGlobalParam {
     int do_analyze_frames;
     int do_bitexact;
     int do_count_frames;
@@ -374,11 +374,11 @@ typedef struct GlobalParams {
     int log_buffer_size;
     AVDictionary *format_opts, *codec_opts;
     int hide_banner;
-} GlobalParams;
+} FFProbeGlobalParam;
 
 static int is_key_selected_callback(AVTextFormatContext *tctx, const char *key)
 {
-    GlobalParams *gp = tctx->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tctx->ffprobe_global_params;
     const AVTextFormatSection *section = tctx->section[tctx->level];
     const EntrySelection *selection = &gp->selected_entries[section - sections];
 
@@ -1023,7 +1023,7 @@ static void print_pkt_side_data(AVTextFormatContext *tfc,
                                 const AVPacketSideData *sd,
                                 SectionID id_data)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     const char *name = av_packet_side_data_name(sd->type);
 
     avtext_print_section_header(tfc, sd, id_data);
@@ -1139,7 +1139,7 @@ static void print_private_data(AVTextFormatContext *tfc, void *priv_data)
 
 static void print_pixel_format(AVTextFormatContext *tfc, enum AVPixelFormat pix_fmt)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     const char *s = av_get_pix_fmt_name(pix_fmt);
     enum AVPixelFormat swapped_pix_fmt;
 
@@ -1223,7 +1223,7 @@ static void print_alpha_mode(AVTextFormatContext *tfc, enum AVAlphaMode alpha_mo
     }
 }
 
-static void clear_log(GlobalParams *gp, int need_lock)
+static void clear_log(FFProbeGlobalParam *gp, int need_lock)
 {
     int i;
 
@@ -1241,7 +1241,7 @@ static void clear_log(GlobalParams *gp, int need_lock)
 
 static int show_log(AVTextFormatContext *tfc, int section_ids, int section_id, int log_level)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     int i;
     ff_mutex_lock(&gp->log_mutex);
     if (!gp->log_buffer_size) {
@@ -1277,7 +1277,7 @@ static int show_log(AVTextFormatContext *tfc, int section_ids, int section_id, i
 
 static void show_packet(AVTextFormatContext *tfc, InputFile *ifile, AVPacket *pkt, int packet_idx)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     AVStream *st = ifile->streams[pkt->stream_index].st;
     AVBPrint pbuf;
     const char *s;
@@ -1424,7 +1424,7 @@ static void print_frame_side_data(AVTextFormatContext *tfc,
 static void show_frame(AVTextFormatContext *tfc, AVFrame *frame, AVStream *stream,
                        AVFormatContext *fmt_ctx)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     FrameData *fd = frame->opaque_ref ? (FrameData*)frame->opaque_ref->data : NULL;
     AVBPrint pbuf;
     char val_str[128];
@@ -1514,7 +1514,7 @@ static av_always_inline int process_frame(AVTextFormatContext *tfc,
                                           AVFrame *frame, const AVPacket *pkt,
                                           int *packet_new)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     AVFormatContext *fmt_ctx = ifile->fmt_ctx;
     AVCodecContext *dec_ctx = ifile->streams[pkt->stream_index].dec_ctx;
     AVCodecParameters *par = ifile->streams[pkt->stream_index].st->codecpar;
@@ -1610,7 +1610,7 @@ static void log_read_interval(const ReadInterval *interval, void *log_ctx, int l
 static int read_interval_packets(AVTextFormatContext *tfc, InputFile *ifile,
                                  const ReadInterval *interval, int64_t *cur_ts)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     AVFormatContext *fmt_ctx = ifile->fmt_ctx;
     AVPacket *pkt = NULL;
     AVFrame *frame = NULL;
@@ -1735,7 +1735,7 @@ end:
 
 static int read_packets( AVTextFormatContext *tfc, InputFile *ifile)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     AVFormatContext *fmt_ctx = ifile->fmt_ctx;
     int i, ret = 0;
     int64_t cur_ts = fmt_ctx->start_time;
@@ -1771,7 +1771,7 @@ static void print_dispositions(AVTextFormatContext *tfc, uint32_t disposition, S
 
 static int show_stream(AVTextFormatContext *tfc, AVFormatContext *fmt_ctx, int stream_idx, InputStream *ist, int container)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     AVStream *stream = ist->st;
     AVCodecParameters *par;
     AVCodecContext *dec_ctx;
@@ -1997,7 +1997,7 @@ static int show_stream(AVTextFormatContext *tfc, AVFormatContext *fmt_ctx, int s
 
 static int show_streams(AVTextFormatContext *tfc, InputFile *ifile)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     AVFormatContext *fmt_ctx = ifile->fmt_ctx;
     int i, ret = 0;
 
@@ -2015,7 +2015,7 @@ static int show_streams(AVTextFormatContext *tfc, InputFile *ifile)
 
 static int show_program(AVTextFormatContext *tfc, InputFile *ifile, AVProgram *program)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     AVFormatContext *fmt_ctx = ifile->fmt_ctx;
     int i, ret = 0;
 
@@ -2262,7 +2262,7 @@ static void print_stream_group_params(AVTextFormatContext *tfc, AVStreamGroup *s
 
 static int show_stream_group(AVTextFormatContext *tfc, InputFile *ifile, AVStreamGroup *stg)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     AVFormatContext *fmt_ctx = ifile->fmt_ctx;
     AVBPrint pbuf;
     int i, ret = 0;
@@ -2324,7 +2324,7 @@ static int show_stream_groups(AVTextFormatContext *tfc, InputFile *ifile)
 
 static int show_chapters(AVTextFormatContext *tfc, InputFile *ifile)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     AVFormatContext *fmt_ctx = ifile->fmt_ctx;
     int i, ret = 0;
 
@@ -2350,7 +2350,7 @@ static int show_chapters(AVTextFormatContext *tfc, InputFile *ifile)
 
 static int show_format(AVTextFormatContext *tfc, InputFile *ifile)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     AVFormatContext *fmt_ctx = ifile->fmt_ctx;
     int64_t size = fmt_ctx->pb ? avio_size(fmt_ctx->pb) : -1;
     int ret = 0;
@@ -2402,7 +2402,7 @@ static int get_decoder_by_name(const char *codec_name, const AVCodec **codec)
     return 0;
 }
 
-static int set_decoders(GlobalParams *gp,AVFormatContext *fmt_ctx)
+static int set_decoders(FFProbeGlobalParam *gp,AVFormatContext *fmt_ctx)
 {
     int ret;
 
@@ -2447,7 +2447,7 @@ static const AVCodec *get_decoder_for_stream(AVFormatContext *fmt_ctx, AVStream 
     return codec;
 }
 
-static int open_input_file(GlobalParams*gp, InputFile *ifile, const char *filename,
+static int open_input_file(FFProbeGlobalParam*gp, InputFile *ifile, const char *filename,
                            const char *print_filename)
 {
     int err, i;
@@ -2582,7 +2582,7 @@ static void close_input_file(InputFile *ifile)
 static int probe_file(AVTextFormatContext *tfc, const char *filename,
                       const char *print_filename)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     InputFile ifile = { 0 };
     int ret, i;
     int section_id;
@@ -2733,7 +2733,7 @@ static void ffprobe_show_library_versions(AVTextFormatContext *tfc)
 
 static void ffprobe_show_pixel_formats(AVTextFormatContext *tfc)
 {
-    GlobalParams *gp = tfc->ffprobe_global_params;
+    FFProbeGlobalParam *gp = tfc->ffprobe_global_params;
     const AVPixFmtDescriptor *pixdesc = NULL;
     int i, n;
 
@@ -2780,7 +2780,7 @@ static void ffprobe_show_pixel_formats(AVTextFormatContext *tfc)
 
 static int opt_show_optional_fields(void *optctx, const char *opt, const char *arg)
 {
-    GlobalParams *gp = optctx;
+    FFProbeGlobalParam *gp = optctx;
     if      (!av_strcasecmp(arg, "always")) gp->show_optional_fields = SHOW_OPTIONAL_FIELDS_ALWAYS;
     else if (!av_strcasecmp(arg, "never"))  gp->show_optional_fields = SHOW_OPTIONAL_FIELDS_NEVER;
     else if (!av_strcasecmp(arg, "auto"))   gp->show_optional_fields = SHOW_OPTIONAL_FIELDS_AUTO;
@@ -2798,7 +2798,7 @@ static int opt_show_optional_fields(void *optctx, const char *opt, const char *a
 
 static int opt_format(void *optctx, const char *opt, const char *arg)
 {
-    GlobalParams *gp = optctx;
+    FFProbeGlobalParam *gp = optctx;
     gp->iformat = av_find_input_format(arg);
     if (!gp->iformat) {
         av_log(NULL, AV_LOG_ERROR, "Unknown input format: %s\n", arg);
@@ -2807,7 +2807,7 @@ static int opt_format(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-static inline void mark_section_show_entries(GlobalParams *gp, SectionID section_id,
+static inline void mark_section_show_entries(FFProbeGlobalParam *gp, SectionID section_id,
                                              int show_all_entries, AVDictionary *entries)
 {
     EntrySelection *selection = &gp->selected_entries[section_id];
@@ -2822,7 +2822,7 @@ static inline void mark_section_show_entries(GlobalParams *gp, SectionID section
     }
 }
 
-static int match_section(GlobalParams *gp, const char *section_name,
+static int match_section(FFProbeGlobalParam *gp, const char *section_name,
                          int show_all_entries, AVDictionary *entries)
 {
     int i, ret = 0;
@@ -2843,7 +2843,7 @@ static int match_section(GlobalParams *gp, const char *section_name,
 
 static int opt_show_entries(void *optctx, const char *opt, const char *arg)
 {
-    GlobalParams *gp = (GlobalParams *)optctx;
+    FFProbeGlobalParam *gp = (FFProbeGlobalParam *)optctx;
     const char *p = arg;
     int ret = 0;
 
@@ -2894,7 +2894,7 @@ static int opt_show_entries(void *optctx, const char *opt, const char *arg)
 
 static int opt_input_file(void *optctx, const char *arg)
 {
-    GlobalParams *gp = (GlobalParams *)optctx;
+    FFProbeGlobalParam *gp = (FFProbeGlobalParam *)optctx;
     if (gp->input_filename) {
         av_log(NULL, AV_LOG_ERROR,
                 "Argument '%s' provided as input filename, but '%s' was already specified.\n",
@@ -2918,7 +2918,7 @@ static int opt_input_file_i(void *optctx, const char *opt, const char *arg)
 
 static int opt_output_file_o(void *optctx, const char *opt, const char *arg)
 {
-    GlobalParams *gp = (GlobalParams *)optctx;
+    FFProbeGlobalParam *gp = (FFProbeGlobalParam *)optctx;
     if (gp->output_filename) {
         av_log(NULL, AV_LOG_ERROR,
                 "Argument '%s' provided as output filename, but '%s' was already specified.\n",
@@ -2936,7 +2936,7 @@ static int opt_output_file_o(void *optctx, const char *opt, const char *arg)
 
 static int opt_print_filename(void *optctx, const char *opt, const char *arg)
 {
-    GlobalParams *gp = (GlobalParams *)optctx;
+    FFProbeGlobalParam *gp = (FFProbeGlobalParam *)optctx;
     av_freep(&gp->print_input_filename);
     gp->print_input_filename = av_strdup(arg);
     return gp->print_input_filename ? 0 : AVERROR(ENOMEM);
@@ -3040,7 +3040,7 @@ end:
     return ret;
 }
 
-static int parse_read_intervals(GlobalParams *gp, const char *intervals_spec)
+static int parse_read_intervals(FFProbeGlobalParam *gp, const char *intervals_spec)
 {
     int ret, n, i;
     char *p, *spec = av_strdup(intervals_spec);
@@ -3090,13 +3090,13 @@ end:
 
 static int opt_read_intervals(void *optctx, const char *opt, const char *arg)
 {
-    GlobalParams *gp = optctx;
+    FFProbeGlobalParam *gp = optctx;
     return parse_read_intervals(gp,arg);
 }
 
 static int opt_pretty(void *optctx, const char *opt, const char *arg)
 {
-    GlobalParams *gp = optctx;
+    FFProbeGlobalParam *gp = optctx;
     gp->show_value_unit              = 1;
     gp->use_value_prefix             = 1;
     gp->use_byte_value_binary_prefix = 1;
@@ -3137,7 +3137,7 @@ static int opt_sections(void *optctx, const char *opt, const char *arg)
 
 static int opt_codec(void *optctx, const char *opt, const char *arg)
 {
-   GlobalParams *gp = optctx;
+   FFProbeGlobalParam *gp = optctx;
    const char *spec = strchr(opt, ':');
    const char **name;
    if (!spec) {
@@ -3168,7 +3168,7 @@ static int opt_codec(void *optctx, const char *opt, const char *arg)
 
 static int opt_show_versions(void *optctx, const char *opt, const char *arg)
 {
-    GlobalParams *gp = optctx;
+    FFProbeGlobalParam *gp = optctx;
     mark_section_show_entries(gp, SECTION_ID_PROGRAM_VERSION, 1, NULL);
     mark_section_show_entries(gp, SECTION_ID_LIBRARY_VERSION, 1, NULL);
     return 0;
@@ -3192,7 +3192,7 @@ DEFINE_OPT_SHOW_SECTION(program_version,  PROGRAM_VERSION)
 DEFINE_OPT_SHOW_SECTION(streams,          STREAMS)
 DEFINE_OPT_SHOW_SECTION(programs,         PROGRAMS)
 DEFINE_OPT_SHOW_SECTION(stream_groups,    STREAM_GROUPS)
-#define OFFSET(x) offsetof(GlobalParams, x)
+#define OFFSET(x) offsetof(FFProbeGlobalParam, x)
 static const OptionDef real_options[] = {
     CMDUTILS_COMMON_OPTIONS
     { "f",                     OPT_TYPE_FUNC, OPT_FUNC_ARG, {.func_arg = opt_format}, "force format", "format" },
@@ -3248,7 +3248,7 @@ static const OptionDef real_options[] = {
     { NULL, },
 };
 
-static inline int check_section_show_entries(GlobalParams*gp,int section_id)
+static inline int check_section_show_entries(FFProbeGlobalParam*gp,int section_id)
 {
     const EntrySelection *selection = &gp->selected_entries[section_id];
 
@@ -3269,7 +3269,7 @@ static inline int check_section_show_entries(GlobalParams*gp,int section_id)
 
 int ffprobe(int argc, const char **argv)
 {
-    GlobalParams global_params = { 0 };
+    FFProbeGlobalParam global_params = { 0 };
     global_params.show_optional_fields = SHOW_OPTIONAL_FIELDS_AUTO;
     global_params.read_intervals_nb = 0;
     global_params.find_stream_info = 1;

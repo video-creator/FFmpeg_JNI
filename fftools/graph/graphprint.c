@@ -863,8 +863,9 @@ static void uninit_graphprint(GraphPrintContext *gpc)
     av_freep(&gpc);
 }
 
-static int init_graphprint(GraphPrintContext **pgpc, AVBPrint *target_buf, FFGlobalParam *global_param)
+static int init_graphprint(GraphPrintContext **pgpc, AVBPrint *target_buf, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     const AVTextFormatter *text_formatter;
     AVTextFormatContext *tfc = NULL;
     AVTextWriterContext *wctx = NULL;
@@ -945,8 +946,9 @@ fail:
 }
 
 
-int print_filtergraph(FilterGraph *fg, AVFilterGraph *graph, FFGlobalParam *global_param)
+int print_filtergraph(FilterGraph *fg, AVFilterGraph *graph, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     av_assert2(fg);
 
     GraphPrintContext *gpc = NULL;
@@ -986,8 +988,9 @@ int print_filtergraph(FilterGraph *fg, AVFilterGraph *graph, FFGlobalParam *glob
     return 0;
 }
 
-static int print_filtergraphs_priv(FilterGraph **graphs, int nb_graphs, InputFile **ifiles, int nb_ifiles, OutputFile **ofiles, int nb_ofiles, FFGlobalParam *global_param)
+static int print_filtergraphs_priv(FilterGraph **graphs, int nb_graphs, InputFile **ifiles, int nb_ifiles, OutputFile **ofiles, int nb_ofiles, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     GraphPrintContext *gpc = NULL;
     AVTextFormatContext *tfc;
     AVBPrint target_buf;
@@ -1071,8 +1074,9 @@ cleanup:
     return ret;
 }
 
-int print_filtergraphs(FilterGraph **graphs, int nb_graphs, InputFile **ifiles, int nb_ifiles, OutputFile **ofiles, int nb_ofiles, FFGlobalParam *global_param)
+int print_filtergraphs(FilterGraph **graphs, int nb_graphs, InputFile **ifiles, int nb_ifiles, OutputFile **ofiles, int nb_ofiles, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     int ret = print_filtergraphs_priv(graphs, nb_graphs, ifiles, nb_ifiles, ofiles, nb_ofiles,global_param);
     ff_resman_uninit();
     return ret;

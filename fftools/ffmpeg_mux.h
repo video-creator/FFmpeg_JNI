@@ -119,7 +119,7 @@ typedef struct Muxer {
 
     SyncQueue              *sq_mux;
     AVPacket               *sq_pkt;
-    struct FFGlobalParam *global_param;
+    struct FFmpegTranscoder *transcoder;
 } Muxer;
 
 int mux_check_init(void *arg);

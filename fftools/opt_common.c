@@ -232,7 +232,7 @@ static void print_buildconf(int flags, int level)
     }
 }
 
-void show_banner(int argc, char **argv, const OptionDef *options, FFGlobalParam *global_param)
+void show_banner(int argc, char **argv, const OptionDef *options, FFGlobalParam*global_param)
 {
     int idx = locate_option(argc, argv, options, "version");
     if (global_param->hide_banner || idx)

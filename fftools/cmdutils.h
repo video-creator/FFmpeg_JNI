@@ -33,7 +33,12 @@
 #ifdef _WIN32
 #undef main /* We don't want SDL to override our main() */
 #endif
-
+typedef struct FFGlobalParam { //ffplay/ffmpeg/ffprobe共用
+    int hide_banner;
+    AVDictionary *sws_dict;
+    AVDictionary *swr_opts;
+    AVDictionary *format_opts, *codec_opts;
+} FFGlobalParam;
 /**
  * program name, defined by the program for show_version().
  */
@@ -53,7 +58,6 @@ extern const int program_birth_year;
  * Initialize dynamic library loading
  */
 void init_dynload(void);
-typedef struct FFGlobalParam FFGlobalParam;
 
 /**
  * Uninitialize the cmdutils option system, in particular
@@ -361,6 +365,8 @@ typedef struct OptionGroupList {
     OptionGroup *groups;
     int       nb_groups;
 } OptionGroupList;
+
+
 
 typedef struct OptionParseContext {
     OptionGroup global_opts;

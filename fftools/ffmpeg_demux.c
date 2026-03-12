@@ -151,7 +151,7 @@ typedef struct Demuxer {
     int                   read_started;
     int                   nb_streams_used;
     int                   nb_streams_finished;
-    FFGlobalParam *global_param;
+    FFmpegTranscoder *transcoder;
 } Demuxer;
 
 typedef struct DemuxThreadContext {
@@ -171,8 +171,9 @@ static Demuxer *demuxer_from_ifile(InputFile *f)
     return (Demuxer*)f;
 }
 
-InputStream *ist_find_unused(enum AVMediaType type, FFGlobalParam *global_param)
+InputStream *ist_find_unused(enum AVMediaType type, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     for (InputStream *ist = ist_iter(NULL, global_param); ist; ist = ist_iter(ist, global_param)) {
         DemuxStream *ds = ds_from_ist(ist);
         if (ist->par->codec_type == type && ds->discard &&
@@ -228,11 +229,11 @@ static void ts_discontinuity_detect(Demuxer *d, InputStream *ist,
     InputFile *ifile = &d->f;
     DemuxStream *ds = ds_from_ist(ist);
     const int fmt_is_discont = ifile->ctx->iformat->flags & AVFMT_TS_DISCONT;
-    int disable_discontinuity_correction = d->global_param->copy_ts;
+    int disable_discontinuity_correction = d->transcoder->global_param->copy_ts;
     int64_t pkt_dts = av_rescale_q_rnd(pkt->dts, pkt->time_base, AV_TIME_BASE_Q,
                                        AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
 
-    if (d->global_param->copy_ts && ds->next_dts != AV_NOPTS_VALUE &&
+    if (d->transcoder->global_param->copy_ts && ds->next_dts != AV_NOPTS_VALUE &&
         fmt_is_discont && ist->st->pts_wrap_bits < 60) {
         int64_t wrap_dts = av_rescale_q_rnd(pkt->dts + (1LL<<ist->st->pts_wrap_bits),
                                             pkt->time_base, AV_TIME_BASE_Q,
@@ -244,7 +245,7 @@ static void ts_discontinuity_detect(Demuxer *d, InputStream *ist,
     if (ds->next_dts != AV_NOPTS_VALUE && !disable_discontinuity_correction) {
         int64_t delta = pkt_dts - ds->next_dts;
         if (fmt_is_discont) {
-            if (FFABS(delta) > 1LL * d->global_param->dts_delta_threshold * AV_TIME_BASE ||
+            if (FFABS(delta) > 1LL * d->transcoder->global_param->dts_delta_threshold * AV_TIME_BASE ||
                 pkt_dts + AV_TIME_BASE/10 < ds->dts) {
                 d->ts_offset_discont -= delta;
                 av_log(ist, AV_LOG_WARNING,
@@ -256,7 +257,7 @@ static void ts_discontinuity_detect(Demuxer *d, InputStream *ist,
                     pkt->pts -= av_rescale_q(delta, AV_TIME_BASE_Q, pkt->time_base);
             }
         } else {
-            if (FFABS(delta) > 1LL * d->global_param->dts_error_threshold * AV_TIME_BASE) {
+            if (FFABS(delta) > 1LL * d->transcoder->global_param->dts_error_threshold * AV_TIME_BASE) {
                 av_log(ist, AV_LOG_WARNING,
                        "DTS %"PRId64", next:%"PRId64" st:%d invalid dropping\n",
                        pkt->dts, ds->next_dts, pkt->stream_index);
@@ -265,7 +266,7 @@ static void ts_discontinuity_detect(Demuxer *d, InputStream *ist,
             if (pkt->pts != AV_NOPTS_VALUE){
                 int64_t pkt_pts = av_rescale_q(pkt->pts, pkt->time_base, AV_TIME_BASE_Q);
                 delta = pkt_pts - ds->next_dts;
-                if (FFABS(delta) > 1LL * d->global_param->dts_error_threshold * AV_TIME_BASE) {
+                if (FFABS(delta) > 1LL * d->transcoder->global_param->dts_error_threshold * AV_TIME_BASE) {
                     av_log(ist, AV_LOG_WARNING,
                            "PTS %"PRId64", next:%"PRId64" invalid dropping st:%d\n",
                            pkt->pts, ds->next_dts, pkt->stream_index);
@@ -273,10 +274,10 @@ static void ts_discontinuity_detect(Demuxer *d, InputStream *ist,
                 }
             }
         }
-    } else if (ds->next_dts == AV_NOPTS_VALUE && !d->global_param->copy_ts &&
+    } else if (ds->next_dts == AV_NOPTS_VALUE && !d->transcoder->global_param->copy_ts &&
                fmt_is_discont && d->last_ts != AV_NOPTS_VALUE) {
         int64_t delta = pkt_dts - d->last_ts;
-        if (FFABS(delta) > 1LL * d->global_param->dts_delta_threshold * AV_TIME_BASE) {
+        if (FFABS(delta) > 1LL * d->transcoder->global_param->dts_delta_threshold * AV_TIME_BASE) {
             d->ts_offset_discont -= delta;
             av_log(ist, AV_LOG_DEBUG,
                    "Inter stream timestamp discontinuity %"PRId64", new offset= %"PRId64"\n",
@@ -382,7 +383,7 @@ static int ts_fixup(Demuxer *d, AVPacket *pkt, FrameData *fd)
     pkt->time_base = ist->st->time_base;
 
 #define SHOW_TS_DEBUG(tag_)                                             \
-    if (d->global_param->debug_ts) {                                                     \
+    if (d->transcoder->global_param->debug_ts) {                                                     \
         av_log(ist, AV_LOG_INFO, "%s -> ist_index:%d:%d type:%s "       \
                "pkt_pts:%s pkt_pts_time:%s pkt_dts:%s pkt_dts_time:%s duration:%s duration_time:%s\n", \
                tag_, ifile->index, pkt->stream_index,                   \
@@ -479,9 +480,9 @@ static int input_packet_process(Demuxer *d, AVPacket *pkt, unsigned *send_flags)
 
     if (d->recording_time != INT64_MAX) {
         int64_t start_time = 0;
-        if (d->global_param->copy_ts) {
+        if (d->transcoder->global_param->copy_ts) {
             start_time += f->start_time != AV_NOPTS_VALUE ? f->start_time : 0;
-            start_time += d->global_param->start_at_zero ? 0 : f->start_time_effective;
+            start_time += d->transcoder->global_param->start_at_zero ? 0 : f->start_time_effective;
         }
         if (ds->dts >= d->recording_time + start_time)
             *send_flags |= DEMUX_SEND_STREAMCOPY_EOF;
@@ -492,7 +493,7 @@ static int input_packet_process(Demuxer *d, AVPacket *pkt, unsigned *send_flags)
 
     fd->wallclock[LATENCY_PROBE_DEMUX] = av_gettime_relative();
 
-    if (d->global_param->debug_ts) {
+    if (d->transcoder->global_param->debug_ts) {
         av_log(ist, AV_LOG_INFO, "demuxer+ffmpeg -> ist_index:%d:%d type:%s pkt_pts:%s pkt_pts_time:%s pkt_dts:%s pkt_dts_time:%s duration:%s duration_time:%s off:%s off_time:%s\n",
                f->index, pkt->stream_index,
                av_get_media_type_string(ist->par->codec_type),
@@ -508,8 +509,8 @@ static int input_packet_process(Demuxer *d, AVPacket *pkt, unsigned *send_flags)
 static void readrate_sleep(Demuxer *d)
 {
     InputFile *f = &d->f;
-    int64_t file_start = d->global_param->copy_ts * (
-                          (f->start_time_effective != AV_NOPTS_VALUE ? f->start_time_effective * !d->global_param->start_at_zero : 0) +
+    int64_t file_start = d->transcoder->global_param->copy_ts * (
+                          (f->start_time_effective != AV_NOPTS_VALUE ? f->start_time_effective * !d->transcoder->global_param->start_at_zero : 0) +
                           (f->start_time != AV_NOPTS_VALUE ? f->start_time : 0)
                          );
     int64_t initial_burst = AV_TIME_BASE * d->readrate_initial_burst;
@@ -763,7 +764,7 @@ static int input_thread(void *arg)
             else {
                 av_log(d, AV_LOG_ERROR, "Error during demuxing: %s\n",
                        av_err2str(ret));
-                ret = d->global_param->exit_on_error ? ret : 0;
+                ret = d->transcoder->global_param->exit_on_error ? ret : 0;
             }
 
             ret_bsf = demux_bsf_flush(d, &dt);
@@ -785,8 +786,8 @@ static int input_thread(void *arg)
             break;
         }
 
-        if (d->global_param->do_pkt_dump) {
-            av_pkt_dump_log2(NULL, AV_LOG_INFO, dt.pkt_demux, d->global_param->do_hex_dump,
+        if (d->transcoder->global_param->do_pkt_dump) {
+            av_pkt_dump_log2(NULL, AV_LOG_INFO, dt.pkt_demux, d->transcoder->global_param->do_hex_dump,
                              f->ctx->streams[dt.pkt_demux->stream_index]);
         }
 
@@ -801,10 +802,10 @@ static int input_thread(void *arg)
         }
 
         if (dt.pkt_demux->flags & AV_PKT_FLAG_CORRUPT) {
-            av_log(d, d->global_param->exit_on_error ? AV_LOG_FATAL : AV_LOG_WARNING,
+            av_log(d, d->transcoder->global_param->exit_on_error ? AV_LOG_FATAL : AV_LOG_WARNING,
                    "corrupt input packet in stream %d\n",
                    dt.pkt_demux->stream_index);
-            if (d->global_param->exit_on_error) {
+            if (d->transcoder->global_param->exit_on_error) {
                 av_packet_unref(dt.pkt_demux);
                 ret = AVERROR_INVALIDDATA;
                 break;
@@ -939,7 +940,6 @@ int ist_use(InputStream *ist, int decoding_needed,
     Demuxer      *d = demuxer_from_ifile(ist->file);
     DemuxStream *ds = ds_from_ist(ist);
     int ret;
-    d->global_param = ist->global_param;
     if (ist->user_set_discard == AVDISCARD_ALL) {
         av_log(ist, AV_LOG_ERROR, "Cannot %s a disabled input stream\n",
                decoding_needed ? "decode" : "streamcopy");
@@ -1017,7 +1017,7 @@ int ist_use(InputStream *ist, int decoding_needed,
             return AVERROR(ENOMEM);
 
         ret = dec_init(&ist->decoder, d->sch,
-                       &ds->decoder_opts, &ds->dec_opts, ds->decoded_params, ist->global_param);
+                       &ds->decoder_opts, &ds->dec_opts, ds->decoded_params, ist->transcoder);
         if (ret < 0)
             return ret;
         ds->sch_idx_dec = ret;
@@ -1121,9 +1121,9 @@ int ist_filter_add(InputStream *ist, InputFilter *ifilter, int is_simple,
     if (ret < 0)
         return ret;
 
-    if (d->global_param->copy_ts) {
+    if (d->transcoder->global_param->copy_ts) {
         tsoffset = d->f.start_time == AV_NOPTS_VALUE ? 0 : d->f.start_time;
-        if (!d->global_param->start_at_zero && d->f.ctx->start_time != AV_NOPTS_VALUE)
+        if (!d->transcoder->global_param->start_at_zero && d->f.ctx->start_time != AV_NOPTS_VALUE)
             tsoffset += d->f.ctx->start_time;
     }
     opts->trim_start_us = ((d->f.start_time == AV_NOPTS_VALUE) || !d->accurate_seek) ?
@@ -1144,11 +1144,11 @@ int ist_filter_add(InputStream *ist, InputFilter *ifilter, int is_simple,
 static int choose_decoder(const OptionsContext *o, void *logctx,
                           AVFormatContext *s, AVStream *st,
                           enum HWAccelID hwaccel_id, enum AVHWDeviceType hwaccel_device_type,
-                          const AVCodec **pcodec, FFGlobalParam *global_param)
+                          const AVCodec **pcodec, FFmpegTranscoder *transcoder)
 
 {
     const char *codec_name = NULL;
-
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     opt_match_per_stream_str(logctx, &o->codec_names, s, st, &codec_name);
     if (codec_name) {
         int ret = find_codec(NULL, codec_name, st->codecpar->codec_type, 0, pcodec, global_param);
@@ -1436,7 +1436,7 @@ static int ist_add(const OptionsContext *o, Demuxer *d, AVStream *st, AVDictiona
     }
 
     ret = choose_decoder(o, ist, ic, st, ds->dec_opts.hwaccel_id,
-                         ds->dec_opts.hwaccel_device_type, &ist->dec, o->global_param);
+                         ds->dec_opts.hwaccel_device_type, &ist->dec, o->transcoder->global_param);
     if (ret < 0)
         return ret;
 
@@ -1709,11 +1709,11 @@ static int istg_parse_tile_grid(const OptionsContext *o, Demuxer *d, InputStream
             goto fail;
     }
 
-    ret = fg_create(NULL, &graph_str, d->sch, &opts,o->global_param);
+    ret = fg_create(NULL, &graph_str, d->sch, &opts,o->transcoder->global_param);
     if (ret < 0)
         goto fail;
 
-    istg->fg = o->global_param->filtergraphs[o->global_param->nb_filtergraphs-1];
+    istg->fg = o->transcoder->global_param->filtergraphs[o->transcoder->global_param->nb_filtergraphs-1];
     istg->fg->is_internal = 1;
 
     ret = 0;
@@ -1749,13 +1749,13 @@ static int istg_add(const OptionsContext *o, Demuxer *d, AVStreamGroup *stg)
     return 0;
 }
 
-static int dump_attachment(InputStream *ist, const char *filename, FFGlobalParam *global_param)
+static int dump_attachment(InputStream *ist, const char *filename, FFmpegTranscoder *transcoder)
 {
     AVStream *st = ist->st;
     int ret;
     AVIOContext *out = NULL;
     const AVDictionaryEntry *e;
-
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     if (!st->codecpar->extradata_size) {
         av_log(ist, AV_LOG_WARNING, "No extradata to dump.\n");
         return 0;
@@ -1801,10 +1801,11 @@ static const AVClass input_file_class = {
     .category   = AV_CLASS_CATEGORY_DEMUXER,
 };
 
-static Demuxer *demux_alloc(FFGlobalParam *global_param)
+static Demuxer *demux_alloc(FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *global_param = transcoder->global_param;
     Demuxer *d = allocate_array_elem(&global_param->input_files, sizeof(*d), &global_param->nb_input_files);
-    d->global_param = global_param;
+    d->transcoder = transcoder;
     if (!d)
         return NULL;
 
@@ -1836,7 +1837,7 @@ int ifile_open(const OptionsContext *o, const char *filename, Scheduler *sch)
     int64_t stop_time      = o->stop_time;
     int64_t recording_time = o->recording_time;
 
-    d = demux_alloc(o->global_param);
+    d = demux_alloc(o->transcoder);
     if (!d)
         return AVERROR(ENOMEM);
 
@@ -1872,7 +1873,7 @@ int ifile_open(const OptionsContext *o, const char *filename, Scheduler *sch)
     if (!strcmp(filename, "-"))
         filename = "fd:";
 
-    o->global_param->stdin_interaction &= strncmp(filename, "pipe:", 5) &&
+    o->transcoder->global_param->stdin_interaction &= strncmp(filename, "pipe:", 5) &&
                          strcmp(filename, "fd:") &&
                          strcmp(filename, "/dev/stdin");
 
@@ -1925,16 +1926,16 @@ int ifile_open(const OptionsContext *o, const char *filename, Scheduler *sch)
 
     if (video_codec_name)
         ret = err_merge(ret, find_codec(NULL, video_codec_name   , AVMEDIA_TYPE_VIDEO   , 0,
-                                        &ic->video_codec,o->global_param));
+                                        &ic->video_codec,o->transcoder->global_param));
     if (audio_codec_name)
         ret = err_merge(ret, find_codec(NULL, audio_codec_name   , AVMEDIA_TYPE_AUDIO   , 0,
-                                        &ic->audio_codec,o->global_param));
+                                        &ic->audio_codec,o->transcoder->global_param));
     if (subtitle_codec_name)
         ret = err_merge(ret, find_codec(NULL, subtitle_codec_name, AVMEDIA_TYPE_SUBTITLE, 0,
-                                        &ic->subtitle_codec,o->global_param));
+                                        &ic->subtitle_codec,o->transcoder->global_param));
     if (data_codec_name)
         ret = err_merge(ret, find_codec(NULL, data_codec_name    , AVMEDIA_TYPE_DATA,     0,
-                                        &ic->data_codec,o->global_param));
+                                        &ic->data_codec,o->transcoder->global_param));
     if (ret < 0) {
         avformat_free_context(ic);
         return ret;
@@ -1948,7 +1949,7 @@ int ifile_open(const OptionsContext *o, const char *filename, Scheduler *sch)
     ic->flags |= AVFMT_FLAG_NONBLOCK;
     if (o->bitexact)
         ic->flags |= AVFMT_FLAG_BITEXACT;
-    ic->interrupt_callback = o->global_param->int_cb;
+    ic->interrupt_callback = o->transcoder->global_param->int_cb;
 
     if (!av_dict_get(o->g->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
         av_dict_set(&o->g->format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
@@ -1981,7 +1982,7 @@ int ifile_open(const OptionsContext *o, const char *filename, Scheduler *sch)
     for (int i = 0; i < ic->nb_streams; i++) {
         const AVCodec *dummy;
         ret = choose_decoder(o, f, ic, ic->streams[i], HWACCEL_NONE, AV_HWDEVICE_TYPE_NONE,
-                             &dummy,o->global_param);
+                             &dummy,o->transcoder->global_param);
         if (ret < 0)
             return ret;
     }
@@ -2061,7 +2062,7 @@ int ifile_open(const OptionsContext *o, const char *filename, Scheduler *sch)
     d->recording_time = recording_time;
     f->input_sync_ref = o->input_sync_ref;
     f->input_ts_offset = o->input_ts_offset;
-    f->ts_offset  = o->input_ts_offset - (o->global_param->copy_ts ? (o->global_param->start_at_zero && ic->start_time != AV_NOPTS_VALUE ? ic->start_time : 0) : timestamp);
+    f->ts_offset  = o->input_ts_offset - (o->transcoder->global_param->copy_ts ? (o->transcoder->global_param->start_at_zero && ic->start_time != AV_NOPTS_VALUE ? ic->start_time : 0) : timestamp);
     d->accurate_seek   = o->accurate_seek;
     d->loop = o->loop;
     d->nb_streams_warn = ic->nb_streams;
@@ -2138,7 +2139,7 @@ int ifile_open(const OptionsContext *o, const char *filename, Scheduler *sch)
             InputStream *ist = f->streams[j];
 
             if (check_stream_specifier(ic, ist->st, o->dump_attachment.opt[i].specifier) == 1) {
-                ret = dump_attachment(ist, o->dump_attachment.opt[i].u.str,o->global_param);
+                ret = dump_attachment(ist, o->dump_attachment.opt[i].u.str,o->transcoder->global_param);
                 if (ret < 0)
                     return ret;
             }

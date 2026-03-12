@@ -183,8 +183,9 @@ static BOOL WINAPI CtrlHandler(DWORD fdwCtrlType)
     signal(sig, func)
 #endif
 
-void term_init(FFGlobalParam *g)
+void term_init(FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *g = transcoder->global_param;
 #if defined __linux__
     struct sigaction action = {0};
     action.sa_handler = sigterm_handler;
@@ -291,8 +292,9 @@ static int decode_interrupt_cb(void *ctx)
 
 const AVIOInterruptCB int_cb = { decode_interrupt_cb, NULL };
 
-static void ffmpeg_cleanup(int ret, FFGlobalParam *g)
+static void ffmpeg_cleanup(int ret, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *g = transcoder->global_param;
     if ((g->print_graphs || g->print_graphs_file) && g->nb_output_files > 0)
         print_filtergraphs(g->filtergraphs, g->nb_filtergraphs, g->input_files, g->nb_input_files, g->output_files, g->nb_output_files,g);
 
@@ -348,8 +350,9 @@ static void ffmpeg_cleanup(int ret, FFGlobalParam *g)
     ffmpeg_exited = 1;
 }
 
-OutputStream *ost_iter(OutputStream *prev,FFGlobalParam *g)
+OutputStream *ost_iter(OutputStream *prev,FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *g = transcoder->global_param;
     int of_idx  = prev ? prev->file->index : 0;
     int ost_idx = prev ? prev->index + 1  : 0;
 
@@ -364,8 +367,9 @@ OutputStream *ost_iter(OutputStream *prev,FFGlobalParam *g)
     return NULL;
 }
 
-InputStream *ist_iter(InputStream *prev,FFGlobalParam *g)
+InputStream *ist_iter(InputStream *prev,FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *g = transcoder->global_param;
     int if_idx  = prev ? prev->file->index : 0;
     int ist_idx = prev ? prev->index + 1  : 0;
 
@@ -528,8 +532,9 @@ int check_avoptions_used(const AVDictionary *opts, const AVDictionary *opts_used
     return 0;
 }
 
-void update_benchmark( FFGlobalParam *g,const char *fmt, ...)
+void update_benchmark( FFmpegTranscoder *transcoder,const char *fmt, ...)
 {
+    FFmpegGlobalParam *g = transcoder->global_param;
     if (g->do_benchmark_all) {
         BenchmarkTimeStamps t = get_benchmark_time_stamps();
         va_list va;
@@ -549,8 +554,9 @@ void update_benchmark( FFGlobalParam *g,const char *fmt, ...)
     }
 }
 
-static void print_report(int is_last_report, int64_t timer_start, int64_t cur_time, int64_t pts, FFGlobalParam *g)
+static void print_report(int is_last_report, int64_t timer_start, int64_t cur_time, int64_t pts, FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *g = transcoder->global_param;
     AVBPrint buf, buf_script;
     int64_t total_size = of_filesize(g->output_files[0]);
     int vid;
@@ -711,8 +717,9 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
     first_report = 0;
 }
 
-static void print_stream_maps(FFGlobalParam *g)
+static void print_stream_maps(FFmpegTranscoder *transcoder)
 {
+    FFmpegGlobalParam *g = transcoder->global_param;
     av_log(NULL, AV_LOG_INFO, "Stream mapping:\n");
     for (InputStream *ist = ist_iter(NULL,g); ist; ist = ist_iter(ist,g)) {
         for (int j = 0; j < ist->nb_filters; j++) {
@@ -799,10 +806,11 @@ static void set_tty_echo(int on)
 #endif
 }
 
-static int check_keyboard_interaction(int64_t cur_time,FFGlobalParam *g)
+static int check_keyboard_interaction(int64_t cur_time,FFmpegTranscoder *transcoder)
 {
     int i, key;
     static int64_t last_time;
+    FFmpegGlobalParam *g = transcoder->global_param;
     /* read_key() returns 0 on EOF */
     if (cur_time - last_time >= 100000) {
         key =  read_key();
@@ -864,11 +872,11 @@ static int check_keyboard_interaction(int64_t cur_time,FFGlobalParam *g)
 /*
  * The following code is the main loop of the file converter
  */
-static int transcode(Scheduler *sch,FFGlobalParam *g)
+static int transcode(Scheduler *sch,FFmpegTranscoder *transcoder)
 {
     int ret = 0;
     int64_t timer_start, transcode_ts = 0;
-
+    FFmpegGlobalParam *g = transcoder->global_param;
     print_stream_maps(g);
 
     atomic_store(&transcode_init_done, 1);
@@ -958,7 +966,7 @@ static int64_t getmaxrss(void)
 #endif
 }
 
-static void init_global_param_val(FFGlobalParam *g) {
+static void init_global_param_val(FFmpegGlobalParam*g) {
     g->dts_delta_threshold = 10;
     g->dts_error_threshold = 3600*30;
     g->video_sync_method = VSYNC_AUTO;
@@ -992,12 +1000,32 @@ static void init_global_param_val(FFGlobalParam *g) {
     g->copy_unknown_streams = 0;
     g->recast_media = 0;
 }
+FFmpegTranscoder * ffmpeg_transcoder_init() {
+    FFmpegTranscoder *transcoder = av_mallocz(sizeof(FFmpegTranscoder));
+    if (!transcoder)
+        return NULL;
+    transcoder->global_param = av_mallocz(sizeof(FFmpegTranscoder));
+    if (!transcoder->global_param) {
+        av_free(transcoder);
+        return NULL;
+    }
+    init_global_param_val(transcoder->global_param);
+    return transcoder;
+}
+void ffmpeg_transcoder_run(FFmpegTranscoder *transcoder,int argc, const char **argv) {
 
+}
+void ffmpeg_transcoder_deinit(FFmpegTranscoder *transcoder) {
+    if (transcoder) {
+        if (transcoder->global_param) {
+            av_free(transcoder->global_param);
+        }
+        av_free(transcoder);
+    }
+}
 int ffmpeg(int argc, const char **argv) {
     Scheduler *sch = NULL;
-    FFGlobalParam global_param;
-    memset(&global_param, 0, sizeof(global_param));
-    init_global_param_val(&global_param);
+    FFmpegTranscoder *transcoder = ffmpeg_transcoder_init();
     int ret;
     BenchmarkTimeStamps ti;
 
@@ -1006,14 +1034,14 @@ int ffmpeg(int argc, const char **argv) {
     setvbuf(stderr,NULL,_IONBF,0); /* win32 runtime needs this */
 
     av_log_set_flags(AV_LOG_SKIP_REPEATED);
-    parse_loglevel(argc, argv, options, &global_param);
+    parse_loglevel(argc, argv, options, transcoder);
 
 #if CONFIG_AVDEVICE
     avdevice_register_all();
 #endif
     avformat_network_init();
 
-    show_banner(argc, argv, options, &global_param);
+    show_banner(argc, argv, options, transcoder);
 
     sch = sch_alloc();
     if (!sch) {
@@ -1022,18 +1050,18 @@ int ffmpeg(int argc, const char **argv) {
     }
 
     /* parse options and open all input/output files */
-    ret = ffmpeg_parse_options(argc, argv, sch,&global_param);
+    ret = ffmpeg_parse_options(argc, argv, sch,transcoder);
     if (ret < 0)
         goto finish;
 
-    if (global_param.nb_output_files <= 0 && global_param.nb_input_files == 0) {
+    if (transcoder->global_param->nb_output_files <= 0 && transcoder->global_param->nb_input_files == 0) {
         show_usage();
         av_log(NULL, AV_LOG_WARNING, "Use -h to get full help or, even better, run 'man %s'\n", program_name);
         ret = 1;
         goto finish;
     }
 
-    if (global_param.nb_output_files <= 0) {
+    if (transcoder->global_param->nb_output_files <= 0) {
         av_log(NULL, AV_LOG_FATAL, "At least one output file must be specified\n");
         ret = 1;
         goto finish;
@@ -1043,14 +1071,14 @@ int ffmpeg(int argc, const char **argv) {
     android_binder_threadpool_init_if_required();
 #endif
 
-    global_param.current_time = ti = get_benchmark_time_stamps();
-    ret = transcode(sch,&global_param);
-    if (ret >= 0 && global_param.do_benchmark) {
+    transcoder->global_param->current_time = ti = get_benchmark_time_stamps();
+    ret = transcode(sch,transcode);
+    if (ret >= 0 && transcoder->global_param->do_benchmark) {
         int64_t utime, stime, rtime;
-        global_param.current_time = get_benchmark_time_stamps();
-        utime = global_param.current_time.user_usec - ti.user_usec;
-        stime = global_param.current_time.sys_usec  - ti.sys_usec;
-        rtime = global_param.current_time.real_usec - ti.real_usec;
+        transcoder->global_param->current_time = get_benchmark_time_stamps();
+        utime = transcoder->global_param->current_time.user_usec - ti.user_usec;
+        stime = transcoder->global_param->current_time.sys_usec  - ti.sys_usec;
+        rtime = transcoder->global_param->current_time.real_usec - ti.real_usec;
         av_log(NULL, AV_LOG_INFO,
                "bench: utime=%0.3fs stime=%0.3fs rtime=%0.3fs\n",
                utime / 1000000.0, stime / 1000000.0, rtime / 1000000.0);
@@ -1063,7 +1091,7 @@ finish:
     if (ret == AVERROR_EXIT)
         ret = 0;
 
-    ffmpeg_cleanup(ret,&global_param);
+    ffmpeg_cleanup(ret,transcoder);
 
     sch_free(&sch);
 
