@@ -271,6 +271,77 @@ static int ffplay_instance_count(void)
     return n;
 }
 
+/* ============================================================
+ * Deferred destruction mechanism
+ * 
+ * To avoid race conditions where an instance is destroyed during
+ * event handling but the pointer is still used in video_refresh,
+ * we use a deferred destruction mechanism:
+ * 1. During event handling, mark instances for destruction
+ * 2. After video_refresh, actually destroy the marked instances
+ * ============================================================ */
+static VideoState *g_pending_destroy[FFPLAY_MAX_INSTANCES];
+static int g_pending_destroy_count = 0;
+
+/* Mark an instance for deferred destruction. Safe to call during event handling. */
+static void ffplay_mark_for_destroy(VideoState *is)
+{
+    if (!is) return;
+    SDL_LockMutex(g_instance_mutex);
+    /* Check if already marked */
+    for (int i = 0; i < g_pending_destroy_count; i++) {
+        if (g_pending_destroy[i] == is) {
+            SDL_UnlockMutex(g_instance_mutex);
+            return;
+        }
+    }
+    /* Add to pending list */
+    if (g_pending_destroy_count < FFPLAY_MAX_INSTANCES) {
+        g_pending_destroy[g_pending_destroy_count++] = is;
+    }
+    SDL_UnlockMutex(g_instance_mutex);
+}
+
+/* Check if an instance is marked for destruction */
+static int ffplay_is_marked_for_destroy(VideoState *is)
+{
+    int result = 0;
+    if (!is) return 1;
+    SDL_LockMutex(g_instance_mutex);
+    for (int i = 0; i < g_pending_destroy_count; i++) {
+        if (g_pending_destroy[i] == is) {
+            result = 1;
+            break;
+        }
+    }
+    SDL_UnlockMutex(g_instance_mutex);
+    return result;
+}
+
+/* Forward declaration: used by ffplay_process_pending_destroys() */
+static void do_exit(VideoState *is);
+
+/* Actually destroy all pending instances. Must be called from main thread. */
+static void ffplay_process_pending_destroys(void)
+{
+    SDL_LockMutex(g_instance_mutex);
+    /* Take a snapshot of pending instances */
+    int count = g_pending_destroy_count;
+    VideoState *to_destroy[FFPLAY_MAX_INSTANCES];
+    for (int i = 0; i < count; i++)
+        to_destroy[i] = g_pending_destroy[i];
+    g_pending_destroy_count = 0;
+    SDL_UnlockMutex(g_instance_mutex);
+    
+    /* Destroy each pending instance */
+    for (int i = 0; i < count; i++) {
+        VideoState *is = to_destroy[i];
+        if (!is) continue;
+        ffplay_unregister_instance(is);
+        do_exit(is);
+    }
+}
+
 /* Forward declaration: used by sdl_event_thread() and ffplay_player_run_event_loop() */
 static int dispatch_sdl_event(SDL_Event *event, VideoState *driver);
 
@@ -384,6 +455,12 @@ struct VideoState {
     AVFormatContext *ic;
     int realtime;
     int64_t show_status_last_time;  /* moved from static local in video_refresh */
+
+    /* --- loading/buffering state (network bad / stalled) --- */
+    int loading;                   /* 1 when buffering/loading, 0 when playing */
+    int64_t loading_start_time_us;  /* first time we entered loading */
+    int64_t last_packet_time_us;    /* last time av_read_frame() succeeded */
+    int64_t last_loading_cb_us;     /* throttle loading callbacks */
 
     Clock audclk;
     Clock vidclk;
@@ -1417,7 +1494,29 @@ static void stream_close(VideoState *is)
 {
     /* XXX: use a special url_shutdown call to abort parse cleanly */
     is->abort_request = 1;
-    SDL_WaitThread(is->read_tid, NULL);
+
+    /* Abort all packet queues to signal decoder threads */
+    packet_queue_abort(&is->audioq);
+    packet_queue_abort(&is->videoq);
+    packet_queue_abort(&is->subtitleq);
+
+    /* Signal all condition variables to wake up waiting threads immediately.
+     * Without these signals, threads may be stuck in SDL_CondWaitTimeout()
+     * and won't notice abort_request until timeout expires. */
+    if (is->continue_read_thread)
+        SDL_CondSignal(is->continue_read_thread);
+    frame_queue_signal(&is->pictq);
+    frame_queue_signal(&is->sampq);
+    frame_queue_signal(&is->subpq);
+
+    /* Wait for the read thread to finish.
+     * Use SDL_WaitThread only if the thread is still valid.
+     * If the thread already exited, SDL_WaitThread may cause double-free on macOS.
+     */
+    if (is->read_tid) {
+        SDL_WaitThread(is->read_tid, NULL);
+        is->read_tid = NULL;
+    }
 
     /* close each stream */
     if (is->audio_stream >= 0)
@@ -1451,40 +1550,14 @@ static void stream_close(VideoState *is)
 
 static void do_exit(VideoState *is)
 {
-    FFPlayGlobalParams *gp = is ? is->global_params : NULL;
-
-    if (is) {
-        stream_close(is);
-    }
-    if (!gp)
-        return;
-
-    if (gp->renderer)
-        SDL_DestroyRenderer(gp->renderer);
-    if (gp->vk_renderer)
-        vk_renderer_destroy(gp->vk_renderer);
-    if (gp->window)
-        SDL_DestroyWindow(gp->window);
-
-    uninit_opts(gp);
-    for (int i = 0; i < gp->nb_vfilters; i++)
-        av_freep(&gp->vfilters_list[i]);
-    av_freep(&gp->vfilters_list);
-    av_freep(&gp->video_codec_name);
-    av_freep(&gp->audio_codec_name);
-    av_freep(&gp->subtitle_codec_name);
-    av_freep(&gp->input_filename);
-
-    if (gp->show_status)
-        printf("\n");
-
-    av_freep(&gp);
-
-    /* NOTE: SDL_Quit() and exit() are intentionally NOT called here.
-     * In a multi-instance / JNI environment, SDL lifecycle is managed
-     * at a higher level (see ffplay_sdl_init / ffplay_sdl_quit).
+    /* Mark the instance for exit, but don't free any resources.
+     * All resources are freed in ffplay_player_destroy() -> stream_close().
+     * This function is called from event handlers (user pressed 'q', etc.)
+     * and should only signal that the instance should stop.
      */
-    av_log(NULL, AV_LOG_QUIET, "%s", "");
+    if (is) {
+        is->abort_request = 1;
+    }
 }
 
 static void sigterm_handler(int sig)
@@ -3037,7 +3110,7 @@ static int read_thread(void *arg)
     err = avformat_open_input(&ic, is->filename, is->iformat, &is->global_params->format_opts);
     if (err < 0) {
         print_error(is->filename, err);
-        ret = -1;
+        ret = err;
         goto fail;
     }
     if (scan_all_pmts_set)
@@ -3151,6 +3224,12 @@ static int read_thread(void *arg)
                                 NULL, 0);
 
     is->show_mode = is->global_params->show_mode;
+
+    /* init loading state */
+    is->loading = 0;
+    is->loading_start_time_us = 0;
+    is->last_packet_time_us = av_gettime_relative();
+    is->last_loading_cb_us = 0;
     if (st_index[AVMEDIA_TYPE_VIDEO] >= 0) {
         AVStream *st = ic->streams[st_index[AVMEDIA_TYPE_VIDEO]];
         AVCodecParameters *codecpar = st->codecpar;
@@ -3245,12 +3324,16 @@ static int read_thread(void *arg)
             is->queue_attachments_req = 0;
         }
 
-        /* if the queue are full, no need to read more */
-        if (is->global_params->infinite_buffer<1 &&
+        /* if the queues are full, no need to read more */
+        if (is->global_params->infinite_buffer < 1 &&
               (is->audioq.size + is->videoq.size + is->subtitleq.size > MAX_QUEUE_SIZE
             || (stream_has_enough_packets(is->audio_st, is->audio_stream, &is->audioq) &&
                 stream_has_enough_packets(is->video_st, is->video_stream, &is->videoq) &&
                 stream_has_enough_packets(is->subtitle_st, is->subtitle_stream, &is->subtitleq)))) {
+            /* This is "buffer-full" (demux is faster than decoders). Not a network-stall.
+             * Do NOT report loading here, otherwise it will be very noisy.
+             */
+
             /* wait 10 ms */
             SDL_LockMutex(wait_mutex);
             SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
@@ -3263,12 +3346,37 @@ static int read_thread(void *arg)
             if (is->global_params->loop != 1 && (!is->global_params->loop || --is->global_params->loop)) {
                 stream_seek(is, is->global_params->start_time != AV_NOPTS_VALUE ? is->global_params->start_time : 0, 0, 0);
             } else if (is->global_params->autoexit) {
-                ret = AVERROR_EOF;
-                goto fail;
+                /* Auto-exit at end: request instance stop.
+                 * Note: we MUST NOT call do_exit() directly here because UI resources and
+                 * instance registry must be cleaned up from the main thread.
+                 */
+                SDL_Event event;
+                event.type = FF_QUIT_EVENT;
+                event.user.data1 = is;
+                SDL_PushEvent(&event);
+                break;
             }
         }
         ret = av_read_frame(ic, pkt);
         if (ret < 0) {
+            /* Network stall detection (debounced):
+             * Enter loading only when:
+             *   - not EOF
+             *   - no packet has been received for LOADING_START_THRESHOLD_MS
+             */
+            if (ret != AVERROR_EOF && ic->pb && !avio_feof(ic->pb)) {
+                const int64_t now_us = av_gettime_relative();
+                const int64_t LOADING_START_THRESHOLD_US = 300000; /* 300ms */
+
+                if (!is->loading && now_us - is->last_packet_time_us >= LOADING_START_THRESHOLD_US) {
+                    is->loading = 1;
+                    is->loading_start_time_us = now_us;
+                    is->last_loading_cb_us = now_us;
+                    trigger_loading_callback(is, 0.0,
+                                             (is->audioq.size + is->videoq.size + is->subtitleq.size) / 1024);
+                }
+            }
+
             if ((ret == AVERROR_EOF || avio_feof(ic->pb)) && !is->eof) {
                 if (is->video_stream >= 0)
                     packet_queue_put_nullpacket(&is->videoq, pkt, is->video_stream);
@@ -3289,6 +3397,27 @@ static int read_thread(void *arg)
             SDL_UnlockMutex(wait_mutex);
             continue;
         } else {
+            /* Successfully received a packet */
+            const int64_t now_us = av_gettime_relative();
+            is->last_packet_time_us = now_us;
+
+            /* Exit loading only after we have buffered enough data to avoid immediate re-buffering.
+             * Here we use packet counts as a lightweight heuristic.
+             */
+            if (is->loading) {
+                const int NEED_AUDIO_PKTS = 8;
+                const int NEED_VIDEO_PKTS = 8;
+                int audio_ok = (is->audio_stream < 0) || (is->audioq.nb_packets >= NEED_AUDIO_PKTS);
+                int video_ok = (is->video_stream < 0) || (is->videoq.nb_packets >= NEED_VIDEO_PKTS);
+
+                if (audio_ok && video_ok) {
+                    is->loading = 0;
+                    is->last_loading_cb_us = now_us;
+                    trigger_loading_callback(is, 1.0,
+                                             (is->audioq.size + is->videoq.size + is->subtitleq.size) / 1024);
+                }
+            }
+
             is->eof = 0;
         }
 
@@ -3331,11 +3460,22 @@ static int read_thread(void *arg)
 
     av_packet_free(&pkt);
     if (ret != 0) {
-        SDL_Event event;
-
-        event.type = FF_QUIT_EVENT;
-        event.user.data1 = is;
-        SDL_PushEvent(&event);
+        /* Startup failed (e.g. avformat_open_input/avformat_find_stream_info failed).
+         * This VideoState is not registered in the instance registry yet.
+         * Posting SDL events here is unsafe because the main thread may concurrently
+         * destroy the FFPlayer on start() error, leading to double-free.
+         *
+         * IMPORTANT: do_exit() also destroys global_params (gp) which is owned by FFPlayer.
+         * In the FFPlayer API, global_params lifetime is managed by ffplay_player_destroy().
+         * Therefore on startup failure we must ONLY cleanup VideoState-side allocations here.
+         */
+        /* Startup failed: only signal the read thread to exit.
+         * Do NOT free resources here because ffplay_player_start() still holds `player->is`.
+         * Cleanup is handled by ffplay_player_destroy() on the main thread.
+         */
+        is->abort_request = 1;
+        SDL_DestroyMutex(wait_mutex);
+        return 0;
     }
     SDL_DestroyMutex(wait_mutex);
     return 0;
@@ -3406,8 +3546,10 @@ static VideoState *stream_open(FFPlayGlobalParams *global_params, FFPlayer *play
     if (!is->read_tid) {
         av_log(NULL, AV_LOG_FATAL, "SDL_CreateThread(): %s\n", SDL_GetError());
 fail:
-        stream_close(is);
-        return NULL;
+        /* Don't free anything here - let ffplay_player_destroy handle cleanup.
+         * Set abort_request so stream_close knows to skip waiting for read_thread. */
+        is->abort_request = 1;
+        return is;  /* Return is so ffplay_player_destroy can clean up properly */
     }
     return is;
 }
@@ -3612,13 +3754,15 @@ static void event_loop(VideoState *cur_stream)
         switch (event.type) {
         case SDL_KEYDOWN:
             if (is->global_params->exit_on_keydown || event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == SDLK_q) {
+                /* Save whether this is the current stream before destroying */
+                int was_cur_stream = (is == cur_stream);
                 ffplay_unregister_instance(is);
                 do_exit(is);
-                /* If no more instances remain, stop this event loop */
+                /* is is now invalid - do not access it */
                 if (ffplay_instance_count() == 0)
                     return;
                 /* The stopped stream was cur_stream – pick any remaining one */
-                if (is == cur_stream) {
+                if (was_cur_stream) {
                     SDL_LockMutex(g_instance_mutex);
                     cur_stream = (g_instance_count > 0) ? g_instances[0].is : NULL;
                     SDL_UnlockMutex(g_instance_mutex);
@@ -3830,17 +3974,23 @@ static void event_loop(VideoState *cur_stream)
                 return;
             }
         case FF_QUIT_EVENT:
-            ffplay_unregister_instance(is);
-            do_exit(is);
-            if (ffplay_instance_count() == 0)
-                return;
-            /* If the closed stream was the one we are refreshing, switch to another */
-            if (is == cur_stream) {
-                SDL_LockMutex(g_instance_mutex);
-                cur_stream = (g_instance_count > 0) ? g_instances[0].is : NULL;
-                SDL_UnlockMutex(g_instance_mutex);
-                if (!cur_stream)
+            {
+                /* Save whether this is the current stream before destroying */
+                int was_cur_stream = (is == cur_stream);
+                ffplay_unregister_instance(is);
+                do_exit(is);
+                /* is is now invalid - do not access it */
+                (void)was_cur_stream;  /* suppress unused warning if needed */
+                if (ffplay_instance_count() == 0)
                     return;
+                /* If the closed stream was the one we are refreshing, switch to another */
+                if (was_cur_stream) {
+                    SDL_LockMutex(g_instance_mutex);
+                    cur_stream = (g_instance_count > 0) ? g_instances[0].is : NULL;
+                    SDL_UnlockMutex(g_instance_mutex);
+                    if (!cur_stream)
+                        return;
+                }
             }
             break;
         default:
@@ -4792,9 +4942,28 @@ int ffplay_player_start(FFPlayer *player)
     player->is = stream_open(p, player, p->input_filename, p->file_iformat);
     if (!player->is) {
         av_log(NULL, AV_LOG_FATAL, "Failed to open '%s'\n", p->input_filename);
-        if (p->window)   { SDL_DestroyWindow(p->window);   p->window   = NULL; }
+
+        /* stream_open failed before creating VideoState, safe to cleanup window/renderer */
         if (p->renderer) { SDL_DestroyRenderer(p->renderer); p->renderer = NULL; }
+        if (p->vk_renderer) { vk_renderer_destroy(p->vk_renderer); p->vk_renderer = NULL; }
+        if (p->window)   { SDL_DestroyWindow(p->window);   p->window   = NULL; }
+
         player_sdl_unref();
+        return AVERROR_UNKNOWN;
+    }
+
+    /* If read_thread failed during startup (e.g. avformat_open_input returned 404),
+     * it sets abort_request=1 and exits without freeing resources. Treat this as a start failure.
+     */
+    /* NOTE: read_thread() reports startup failure by setting abort_request=1.
+     * At this point, read_thread may still be running, so do NOT call stream_close()/do_exit()
+     * here (they would wait/free and can race with partially initialised queues).
+     * Instead, let the caller destroy the player (ffplay_player_destroy) which will perform
+     * a consistent cleanup.
+     */
+    if (player->is->abort_request && !player->is->ic) {
+        av_log(NULL, AV_LOG_ERROR, "ffplay_player_start: startup failed\n");
+        player->started = 1; /* so ffplay_player_destroy() will take the started-path */
         return AVERROR_UNKNOWN;
     }
 
@@ -4808,8 +4977,8 @@ int ffplay_player_start(FFPlayer *player)
     SDL_UnlockMutex(g_event_thread_lock);
     if (ret < 0) {
         ffplay_unregister_instance(player->is);
-        stream_close(player->is);
-        player->is = NULL;
+        /* Don't free anything here - let ffplay_player_destroy handle cleanup */
+        player->started = 1;  /* So ffplay_player_destroy will clean up is */
         player_sdl_unref();
         return ret;
     }
@@ -4950,14 +5119,37 @@ void ffplay_player_destroy(FFPlayer *player)
     if (player->started) {
         VideoState *is = player->is;
         if (is) {
-            /* The event loop may have already called do_exit() on this instance
-             * (e.g. via FF_QUIT_EVENT).  In that case is->player->is has been
-             * set to NULL by the event-loop path.  Only call do_exit() if the
-             * VideoState is still alive (i.e. still registered). */
-            ffplay_unregister_instance(is);   /* safe to call even if not registered */
-            do_exit(is);
-            player->is = NULL;
+            /* Unregister instance from global registry */
+            ffplay_unregister_instance(is);   /* safe even if not registered */
+            
+            /* Detach read thread to avoid SDL_WaitThread issues on macOS */
+            if (is->read_tid) {
+                SDL_DetachThread(is->read_tid);
+                is->read_tid = NULL;
+            }
+            
+            /* Call stream_close once - this frees is and all its resources */
+            stream_close(is);
+            player->is = NULL;  /* Mark as destroyed */
         }
+        
+        /* Free player->params (global_params) */
+        if (player->params) {
+            FFPlayGlobalParams *p = player->params;
+            if (p->renderer) { SDL_DestroyRenderer(p->renderer); p->renderer = NULL; }
+            if (p->vk_renderer) { vk_renderer_destroy(p->vk_renderer); p->vk_renderer = NULL; }
+            if (p->window)   { SDL_DestroyWindow(p->window);   p->window   = NULL; }
+            uninit_opts(p);
+            for (int i = 0; i < p->nb_vfilters; i++)
+                av_freep(&p->vfilters_list[i]);
+            av_freep(&p->vfilters_list);
+            av_freep(&p->video_codec_name);
+            av_freep(&p->audio_codec_name);
+            av_freep(&p->subtitle_codec_name);
+            av_freep(&p->input_filename);
+            av_freep(&player->params);
+        }
+        
         player_sdl_unref();
     } else if (player->params) {
         /* Never started – only free params */

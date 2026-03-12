@@ -29,6 +29,19 @@
 
 #include "ffplay_jni.h"
 
+static void ffplay_loading_cb(FFPlayer *p, double progress, int buffer_kb, void *user_data)
+{
+    (void)p;
+    const char *tag = (const char *)user_data;
+
+    if (progress <= 0.0)
+        fprintf(stderr, "[%s] loading start (buffer=%d KB)\n", tag ? tag : "?", buffer_kb);
+    else if (progress >= 1.0)
+        fprintf(stderr, "[%s] loading end   (buffer=%d KB)\n", tag ? tag : "?", buffer_kb);
+    else
+        fprintf(stderr, "[%s] loading %.0f%% (buffer=%d KB)\n", tag ? tag : "?", progress * 100.0, buffer_kb);
+}
+
 /* Called from the main */
 int main(int argc, char **argv)
 {
@@ -83,6 +96,10 @@ int main(int argc, char **argv)
 
             ffplay_player_set_url(players[i], url);
 
+            /* loading callback test: print loading start/end */
+            /* Use a stable pointer (argv string) as user_data to avoid ownership issues in tests. */
+            ffplay_player_set_loading_callback(players[i], ffplay_loading_cb, (void *)url);
+
             char title[256];
             snprintf(title, sizeof(title), "FFPlayer #%d", i);
             ffplay_player_set_title(players[i], title);
@@ -106,15 +123,40 @@ int main(int argc, char **argv)
             return 1;
         }
 
-        /* Main-thread tick: returns 0 when no instances remain */
-        while (ffplay_player_run_event_loop(1) > 0) {
-            /* noop */
+        /* Main-thread tick: stop when all players reach EOF or are closed */
+        for (;;) {
+            if (ffplay_player_run_event_loop(1) <= 0)
+                break;
+
+            int all_eof = 1;
+            for (int i = 0; i < count; i++) {
+                if (players[i] && !ffplay_player_is_eof(players[i])) {
+                    all_eof = 0;
+                    break;
+                }
+            }
+            if (all_eof) {
+                for (int i = 0; i < count; i++) {
+                    if (players[i]) {
+                        ffplay_player_destroy(players[i]);
+                        players[i] = NULL;
+                    }
+                }
+                break;
+            }
         }
 
-        /* Cleanup (safe even if instances already closed themselves) */
+        /* Cleanup (safe even if instances already closed themselves)
+         * NOTE: callback user_data was strdup(tag) above, free it here.
+         */
         for (int i = 0; i < count; i++) {
-            if (players[i])
+            if (players[i]) {
+                /* Best-effort: callback userdata string is owned by this test. */
+                /* We cannot retrieve it back from FFPlayer API, so we don't free it here.
+                 * For a real app you should manage the lifecycle externally.
+                 */
                 ffplay_player_destroy(players[i]);
+            }
         }
         free(players);
         return 0;
