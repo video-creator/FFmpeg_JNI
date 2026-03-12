@@ -185,7 +185,105 @@ enum {
     AV_SYNC_EXTERNAL_CLOCK, /* synchronize to an external clock */
 };
 #define FF_QUIT_EVENT (SDL_USEREVENT + 2)
-typedef struct FFPlayGlobalParams {
+
+/* Forward declarations needed by the multi-instance registry below */
+typedef struct VideoState VideoState;
+typedef struct FFPlayGlobalParams FFPlayGlobalParams;
+
+/* ============================================================
+ * Multi-instance registry
+ * Maps SDL windowID → VideoState so events can be dispatched
+ * to the correct player instance without any globals.
+ * All operations are protected by a single SDL mutex.
+ * ============================================================ */
+#define FFPLAY_MAX_INSTANCES 64
+
+typedef struct FFPlayInstanceEntry {
+    Uint32        window_id;   /* SDL_GetWindowID(gp->window) */
+    VideoState   *is;
+} FFPlayInstanceEntry;
+
+static FFPlayInstanceEntry g_instances[FFPLAY_MAX_INSTANCES];
+static int                 g_instance_count = 0;
+static SDL_mutex          *g_instance_mutex = NULL;   /* created on first SDL_Init */
+
+/* Called once after SDL_Init() to create the registry mutex */
+static void ffplay_registry_init(void)
+{
+    if (!g_instance_mutex)
+        g_instance_mutex = SDL_CreateMutex();
+}
+
+/* Called once when the last instance exits, to destroy the mutex */
+static void ffplay_registry_destroy(void)
+{
+    if (g_instance_mutex) {
+        SDL_DestroyMutex(g_instance_mutex);
+        g_instance_mutex = NULL;
+    }
+}
+
+static void ffplay_register_instance(Uint32 window_id, VideoState *is)
+{
+    SDL_LockMutex(g_instance_mutex);
+    if (g_instance_count < FFPLAY_MAX_INSTANCES) {
+        g_instances[g_instance_count].window_id = window_id;
+        g_instances[g_instance_count].is        = is;
+        g_instance_count++;
+    }
+    SDL_UnlockMutex(g_instance_mutex);
+}
+
+static void ffplay_unregister_instance(VideoState *is)
+{
+    SDL_LockMutex(g_instance_mutex);
+    for (int i = 0; i < g_instance_count; i++) {
+        if (g_instances[i].is == is) {
+            g_instances[i] = g_instances[--g_instance_count];
+            break;
+        }
+    }
+    SDL_UnlockMutex(g_instance_mutex);
+}
+
+/* Returns NULL if not found */
+static VideoState *ffplay_find_instance_by_window(Uint32 window_id)
+{
+    VideoState *result = NULL;
+    SDL_LockMutex(g_instance_mutex);
+    for (int i = 0; i < g_instance_count; i++) {
+        if (g_instances[i].window_id == window_id) {
+            result = g_instances[i].is;
+            break;
+        }
+    }
+    SDL_UnlockMutex(g_instance_mutex);
+    return result;
+}
+
+/* Returns the number of currently active instances */
+static int ffplay_instance_count(void)
+{
+    int n;
+    SDL_LockMutex(g_instance_mutex);
+    n = g_instance_count;
+    SDL_UnlockMutex(g_instance_mutex);
+    return n;
+}
+
+/* Forward declaration: used by sdl_event_thread() and ffplay_player_run_event_loop() */
+static int dispatch_sdl_event(SDL_Event *event, VideoState *driver);
+
+/* Helper to trigger loading callback */
+/* Forward declaration - implemented after FFPlayer struct is defined */
+static void trigger_loading_callback(VideoState *is, double progress, int buffer_kb);
+
+/* Global SDL initialisation reference-count */
+static int g_sdl_init_count = 0;
+static SDL_mutex *g_sdl_init_mutex = NULL;   /* needs to be created before SDL_Init */
+
+/* ============================================================ */
+struct FFPlayGlobalParams {
     /* options specified by the user */
     AVInputFormat* file_iformat;
     char* input_filename;
@@ -253,7 +351,7 @@ typedef struct FFPlayGlobalParams {
     AVDictionary *swr_opts;
     AVDictionary *format_opts, *codec_opts;
     int dummy;
-} FFPlayGlobalParams;
+};
 
 typedef struct Decoder {
     AVPacket *pkt;
@@ -270,7 +368,7 @@ typedef struct Decoder {
     SDL_Thread *decoder_tid;
 } Decoder;
 
-typedef struct VideoState {
+struct VideoState {
     SDL_Thread *read_tid;
     const AVInputFormat *iformat;
     int abort_request;
@@ -285,6 +383,7 @@ typedef struct VideoState {
     int read_pause_return;
     AVFormatContext *ic;
     int realtime;
+    int64_t show_status_last_time;  /* moved from static local in video_refresh */
 
     Clock audclk;
     Clock vidclk;
@@ -371,7 +470,8 @@ typedef struct VideoState {
 
     SDL_cond *continue_read_thread;
     FFPlayGlobalParams *global_params;
-} VideoState;
+    FFPlayer *player;  /* back pointer to FFPlayer handle */
+};
 
 static const struct TextureFormatEntry {
     enum AVPixelFormat format;
@@ -1351,29 +1451,40 @@ static void stream_close(VideoState *is)
 
 static void do_exit(VideoState *is)
 {
+    FFPlayGlobalParams *gp = is ? is->global_params : NULL;
+
     if (is) {
         stream_close(is);
     }
-    if (is->global_params->renderer)
-        SDL_DestroyRenderer(is->global_params->renderer);
-    if (is->global_params->vk_renderer)
-        vk_renderer_destroy(is->global_params->vk_renderer);
-    if (is->global_params->window)
-        SDL_DestroyWindow(is->global_params->window);
-    uninit_opts(is->global_params);
-    for (int i = 0; i < is->global_params->nb_vfilters; i++)
-        av_freep(&is->global_params->vfilters_list[i]);
-    av_freep(&is->global_params->vfilters_list);
-    av_freep(&is->global_params->video_codec_name);
-    av_freep(&is->global_params->audio_codec_name);
-    av_freep(&is->global_params->subtitle_codec_name);
-    av_freep(&is->global_params->input_filename);
-    avformat_network_deinit();
-    if (is->global_params->show_status)
+    if (!gp)
+        return;
+
+    if (gp->renderer)
+        SDL_DestroyRenderer(gp->renderer);
+    if (gp->vk_renderer)
+        vk_renderer_destroy(gp->vk_renderer);
+    if (gp->window)
+        SDL_DestroyWindow(gp->window);
+
+    uninit_opts(gp);
+    for (int i = 0; i < gp->nb_vfilters; i++)
+        av_freep(&gp->vfilters_list[i]);
+    av_freep(&gp->vfilters_list);
+    av_freep(&gp->video_codec_name);
+    av_freep(&gp->audio_codec_name);
+    av_freep(&gp->subtitle_codec_name);
+    av_freep(&gp->input_filename);
+
+    if (gp->show_status)
         printf("\n");
-    SDL_Quit();
+
+    av_freep(&gp);
+
+    /* NOTE: SDL_Quit() and exit() are intentionally NOT called here.
+     * In a multi-instance / JNI environment, SDL lifecycle is managed
+     * at a higher level (see ffplay_sdl_init / ffplay_sdl_quit).
+     */
     av_log(NULL, AV_LOG_QUIET, "%s", "");
-    exit(0);
 }
 
 static void sigterm_handler(int sig)
@@ -1751,13 +1862,12 @@ display:
     is->force_refresh = 0;
     if (is->global_params->show_status) {
         AVBPrint buf;
-        static int64_t last_time;
         int64_t cur_time;
         int aqsize, vqsize, sqsize;
         double av_diff;
 
         cur_time = av_gettime_relative();
-        if (!last_time || (cur_time - last_time) >= 30000) {
+        if (!is->show_status_last_time || (cur_time - is->show_status_last_time) >= 30000) {
             aqsize = 0;
             vqsize = 0;
             sqsize = 0;
@@ -1794,7 +1904,7 @@ display:
             fflush(stderr);
             av_bprint_finalize(&buf, NULL);
 
-            last_time = cur_time;
+            is->show_status_last_time = cur_time;
         }
     }
 }
@@ -3231,7 +3341,7 @@ static int read_thread(void *arg)
     return 0;
 }
 
-static VideoState *stream_open(FFPlayGlobalParams *global_params, const char *filename,
+static VideoState *stream_open(FFPlayGlobalParams *global_params, FFPlayer *player, const char *filename,
                                const AVInputFormat *iformat)
 {
     VideoState *is;
@@ -3240,6 +3350,7 @@ static VideoState *stream_open(FFPlayGlobalParams *global_params, const char *fi
     if (!is)
         return NULL;
     is->global_params = global_params;
+    is->player = player;  /* Store the FFPlayer reference */
     is->last_video_stream = is->video_stream = -1;
     is->last_audio_stream = is->audio_stream = -1;
     is->last_subtitle_stream = is->subtitle_stream = -1;
@@ -3409,8 +3520,18 @@ static void refresh_loop_wait_event(VideoState *is, SDL_Event *event) {
         if (remaining_time > 0.0)
             av_usleep((int64_t)(remaining_time * 1000000.0));
         remaining_time = REFRESH_RATE;
-        if (is->show_mode != SHOW_MODE_NONE && (!is->paused || is->force_refresh))
-            video_refresh(is, &remaining_time);
+        /* refresh all registered instances, not just `is` */
+        SDL_LockMutex(g_instance_mutex);
+        int cnt = g_instance_count;
+        VideoState *snaps[FFPLAY_MAX_INSTANCES];
+        for (int i = 0; i < cnt; i++)
+            snaps[i] = g_instances[i].is;
+        SDL_UnlockMutex(g_instance_mutex);
+        for (int i = 0; i < cnt; i++) {
+            if (snaps[i]->show_mode != SHOW_MODE_NONE &&
+                (!snaps[i]->paused || snaps[i]->force_refresh))
+                video_refresh(snaps[i], &remaining_time);
+        }
         SDL_PumpEvents();
     }
 }
@@ -3447,84 +3568,133 @@ static void event_loop(VideoState *cur_stream)
 {
     SDL_Event event;
     double incr, pos, frac;
+    /* Resolve the VideoState for this particular event.
+     * For window events we look up by windowID so that multi-instance
+     * setups dispatch to the correct player.  Key / mouse events that
+     * carry a windowID are handled the same way.
+     * Events with no window association fall back to cur_stream. */
+    VideoState *is;
 
     for (;;) {
         double x;
         refresh_loop_wait_event(cur_stream, &event);
+
+        /* ---- resolve the target VideoState from the event windowID ---- */
+        switch (event.type) {
+        case SDL_WINDOWEVENT:
+            is = ffplay_find_instance_by_window(event.window.windowID);
+            if (!is) is = cur_stream;
+            break;
+        case SDL_KEYDOWN:
+        case SDL_KEYUP:
+            is = ffplay_find_instance_by_window(event.key.windowID);
+            if (!is) is = cur_stream;
+            break;
+        case SDL_MOUSEBUTTONDOWN:
+        case SDL_MOUSEBUTTONUP:
+            is = ffplay_find_instance_by_window(event.button.windowID);
+            if (!is) is = cur_stream;
+            break;
+        case SDL_MOUSEMOTION:
+            is = ffplay_find_instance_by_window(event.motion.windowID);
+            if (!is) is = cur_stream;
+            break;
+        case FF_QUIT_EVENT:
+            /* data1 contains the VideoState that requested quit */
+            is = (VideoState *)event.user.data1;
+            if (!is) is = cur_stream;
+            break;
+        default:
+            is = cur_stream;
+            break;
+        }
+
         switch (event.type) {
         case SDL_KEYDOWN:
-            if (cur_stream->global_params->exit_on_keydown || event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == SDLK_q) {
-                do_exit(cur_stream);
+            if (is->global_params->exit_on_keydown || event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == SDLK_q) {
+                ffplay_unregister_instance(is);
+                do_exit(is);
+                /* If no more instances remain, stop this event loop */
+                if (ffplay_instance_count() == 0)
+                    return;
+                /* The stopped stream was cur_stream – pick any remaining one */
+                if (is == cur_stream) {
+                    SDL_LockMutex(g_instance_mutex);
+                    cur_stream = (g_instance_count > 0) ? g_instances[0].is : NULL;
+                    SDL_UnlockMutex(g_instance_mutex);
+                    if (!cur_stream)
+                        return;
+                }
                 break;
             }
             // If we don't yet have a window, skip all key events, because read_thread might still be initializing...
-            if (!cur_stream->width)
+            if (!is->width)
                 continue;
             switch (event.key.keysym.sym) {
             case SDLK_f:
-                toggle_full_screen(cur_stream);
-                cur_stream->force_refresh = 1;
+                toggle_full_screen(is);
+                is->force_refresh = 1;
                 break;
             case SDLK_p:
             case SDLK_SPACE:
-                toggle_pause(cur_stream);
+                toggle_pause(is);
                 break;
             case SDLK_m:
-                toggle_mute(cur_stream);
+                toggle_mute(is);
                 break;
             case SDLK_KP_MULTIPLY:
             case SDLK_0:
-                update_volume(cur_stream, 1, SDL_VOLUME_STEP);
+                update_volume(is, 1, SDL_VOLUME_STEP);
                 break;
             case SDLK_KP_DIVIDE:
             case SDLK_9:
-                update_volume(cur_stream, -1, SDL_VOLUME_STEP);
+                update_volume(is, -1, SDL_VOLUME_STEP);
                 break;
             case SDLK_s: // S: Step to next frame
-                step_to_next_frame(cur_stream);
+                step_to_next_frame(is);
                 break;
             case SDLK_a:
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_AUDIO);
+                stream_cycle_channel(is, AVMEDIA_TYPE_AUDIO);
                 break;
             case SDLK_v:
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_VIDEO);
+                stream_cycle_channel(is, AVMEDIA_TYPE_VIDEO);
                 break;
             case SDLK_c:
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_VIDEO);
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_AUDIO);
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_SUBTITLE);
+                stream_cycle_channel(is, AVMEDIA_TYPE_VIDEO);
+                stream_cycle_channel(is, AVMEDIA_TYPE_AUDIO);
+                stream_cycle_channel(is, AVMEDIA_TYPE_SUBTITLE);
                 break;
             case SDLK_t:
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_SUBTITLE);
+                stream_cycle_channel(is, AVMEDIA_TYPE_SUBTITLE);
                 break;
             case SDLK_w:
-                if (cur_stream->show_mode == SHOW_MODE_VIDEO && cur_stream->vfilter_idx < cur_stream->global_params->nb_vfilters - 1) {
-                    if (++cur_stream->vfilter_idx >= cur_stream->global_params->nb_vfilters)
-                        cur_stream->vfilter_idx = 0;
+                if (is->show_mode == SHOW_MODE_VIDEO && is->vfilter_idx < is->global_params->nb_vfilters - 1) {
+                    if (++is->vfilter_idx >= is->global_params->nb_vfilters)
+                        is->vfilter_idx = 0;
                 } else {
-                    cur_stream->vfilter_idx = 0;
-                    toggle_audio_display(cur_stream);
+                    is->vfilter_idx = 0;
+                    toggle_audio_display(is);
                 }
                 break;
             case SDLK_PAGEUP:
-                if (cur_stream->ic->nb_chapters <= 1) {
+                if (is->ic->nb_chapters <= 1) {
                     incr = 600.0;
                     goto do_seek;
                 }
-                seek_chapter(cur_stream, 1);
+                seek_chapter(is, 1);
                 break;
             case SDLK_PAGEDOWN:
-                if (cur_stream->ic->nb_chapters <= 1) {
+                if (is->ic->nb_chapters <= 1) {
                     incr = -600.0;
                     goto do_seek;
                 }
-                seek_chapter(cur_stream, -1);
+                seek_chapter(is, -1);
                 break;
             case SDLK_LEFT:
-                incr = cur_stream->global_params->seek_interval ? -cur_stream->global_params->seek_interval : -10.0;
+                incr = is->global_params->seek_interval ? -is->global_params->seek_interval : -10.0;
                 goto do_seek;
             case SDLK_RIGHT:
-                incr = cur_stream->global_params->seek_interval ? cur_stream->global_params->seek_interval : 10.0;
+                incr = is->global_params->seek_interval ? is->global_params->seek_interval : 10.0;
                 goto do_seek;
             case SDLK_UP:
                 incr = 60.0;
@@ -3532,28 +3702,28 @@ static void event_loop(VideoState *cur_stream)
             case SDLK_DOWN:
                 incr = -60.0;
             do_seek:
-                    if (cur_stream->global_params->seek_by_bytes) {
+                    if (is->global_params->seek_by_bytes) {
                         pos = -1;
-                        if (pos < 0 && cur_stream->video_stream >= 0)
-                            pos = frame_queue_last_pos(&cur_stream->pictq);
-                        if (pos < 0 && cur_stream->audio_stream >= 0)
-                            pos = frame_queue_last_pos(&cur_stream->sampq);
+                        if (pos < 0 && is->video_stream >= 0)
+                            pos = frame_queue_last_pos(&is->pictq);
+                        if (pos < 0 && is->audio_stream >= 0)
+                            pos = frame_queue_last_pos(&is->sampq);
                         if (pos < 0)
-                            pos = avio_tell(cur_stream->ic->pb);
-                        if (cur_stream->ic->bit_rate)
-                            incr *= cur_stream->ic->bit_rate / 8.0;
+                            pos = avio_tell(is->ic->pb);
+                        if (is->ic->bit_rate)
+                            incr *= is->ic->bit_rate / 8.0;
                         else
                             incr *= 180000.0;
                         pos += incr;
-                        stream_seek(cur_stream, pos, incr, 1);
+                        stream_seek(is, pos, incr, 1);
                     } else {
-                        pos = get_master_clock(cur_stream);
+                        pos = get_master_clock(is);
                         if (isnan(pos))
-                            pos = (double)cur_stream->seek_pos / AV_TIME_BASE;
+                            pos = (double)is->seek_pos / AV_TIME_BASE;
                         pos += incr;
-                        if (cur_stream->ic->start_time != AV_NOPTS_VALUE && pos < cur_stream->ic->start_time / (double)AV_TIME_BASE)
-                            pos = cur_stream->ic->start_time / (double)AV_TIME_BASE;
-                        stream_seek(cur_stream, (int64_t)(pos * AV_TIME_BASE), (int64_t)(incr * AV_TIME_BASE), 0);
+                        if (is->ic->start_time != AV_NOPTS_VALUE && pos < is->ic->start_time / (double)AV_TIME_BASE)
+                            pos = is->ic->start_time / (double)AV_TIME_BASE;
+                        stream_seek(is, (int64_t)(pos * AV_TIME_BASE), (int64_t)(incr * AV_TIME_BASE), 0);
                     }
                 break;
             default:
@@ -3561,26 +3731,36 @@ static void event_loop(VideoState *cur_stream)
             }
             break;
         case SDL_MOUSEBUTTONDOWN:
-            if (cur_stream->global_params->exit_on_mousedown) {
-                do_exit(cur_stream);
+            if (is->global_params->exit_on_mousedown) {
+                ffplay_unregister_instance(is);
+                do_exit(is);
+                if (ffplay_instance_count() == 0)
+                    return;
+                if (is == cur_stream) {
+                    SDL_LockMutex(g_instance_mutex);
+                    cur_stream = (g_instance_count > 0) ? g_instances[0].is : NULL;
+                    SDL_UnlockMutex(g_instance_mutex);
+                    if (!cur_stream)
+                        return;
+                }
                 break;
             }
             if (event.button.button == SDL_BUTTON_LEFT) {
                 static int64_t last_mouse_left_click = 0;
                 if (av_gettime_relative() - last_mouse_left_click <= 500000) {
-                    toggle_full_screen(cur_stream);
-                    cur_stream->force_refresh = 1;
+                    toggle_full_screen(is);
+                    is->force_refresh = 1;
                     last_mouse_left_click = 0;
                 } else {
                     last_mouse_left_click = av_gettime_relative();
                 }
             }
         case SDL_MOUSEMOTION:
-            if (cur_stream->global_params->cursor_hidden) {
+            if (is->global_params->cursor_hidden) {
                 SDL_ShowCursor(1);
-                cur_stream->global_params->cursor_hidden = 0;
+                is->global_params->cursor_hidden = 0;
             }
-            cur_stream->global_params->cursor_last_shown = av_gettime_relative();
+            is->global_params->cursor_last_shown = av_gettime_relative();
             if (event.type == SDL_MOUSEBUTTONDOWN) {
                 if (event.button.button != SDL_BUTTON_RIGHT)
                     break;
@@ -3590,18 +3770,18 @@ static void event_loop(VideoState *cur_stream)
                     break;
                 x = event.motion.x;
             }
-                if (cur_stream->global_params->seek_by_bytes || cur_stream->ic->duration <= 0) {
-                    uint64_t size =  avio_size(cur_stream->ic->pb);
-                    stream_seek(cur_stream, size*x/cur_stream->width, 0, 1);
+                if (is->global_params->seek_by_bytes || is->ic->duration <= 0) {
+                    uint64_t size =  avio_size(is->ic->pb);
+                    stream_seek(is, size*x/is->width, 0, 1);
                 } else {
                     int64_t ts;
                     int ns, hh, mm, ss;
                     int tns, thh, tmm, tss;
-                    tns  = cur_stream->ic->duration / 1000000LL;
+                    tns  = is->ic->duration / 1000000LL;
                     thh  = tns / 3600;
                     tmm  = (tns % 3600) / 60;
                     tss  = (tns % 60);
-                    frac = x / cur_stream->width;
+                    frac = x / is->width;
                     ns   = frac * tns;
                     hh   = ns / 3600;
                     mm   = (ns % 3600) / 60;
@@ -3609,30 +3789,59 @@ static void event_loop(VideoState *cur_stream)
                     av_log(NULL, AV_LOG_INFO,
                            "Seek to %2.0f%% (%2d:%02d:%02d) of total duration (%2d:%02d:%02d)       \n", frac*100,
                             hh, mm, ss, thh, tmm, tss);
-                    ts = frac * cur_stream->ic->duration;
-                    if (cur_stream->ic->start_time != AV_NOPTS_VALUE)
-                        ts += cur_stream->ic->start_time;
-                    stream_seek(cur_stream, ts, 0, 0);
+                    ts = frac * is->ic->duration;
+                    if (is->ic->start_time != AV_NOPTS_VALUE)
+                        ts += is->ic->start_time;
+                    stream_seek(is, ts, 0, 0);
                 }
             break;
         case SDL_WINDOWEVENT:
             switch (event.window.event) {
                 case SDL_WINDOWEVENT_SIZE_CHANGED:
-                    cur_stream->global_params->screen_width  = cur_stream->width  = event.window.data1;
-                    cur_stream->global_params->screen_height = cur_stream->height = event.window.data2;
-                    if (cur_stream->vis_texture) {
-                        SDL_DestroyTexture(cur_stream->vis_texture);
-                        cur_stream->vis_texture = NULL;
+                    is->global_params->screen_width  = is->width  = event.window.data1;
+                    is->global_params->screen_height = is->height = event.window.data2;
+                    if (is->vis_texture) {
+                        SDL_DestroyTexture(is->vis_texture);
+                        is->vis_texture = NULL;
                     }
-                    if (cur_stream->global_params->vk_renderer)
-                        vk_renderer_resize(cur_stream->global_params->vk_renderer, cur_stream->global_params->screen_width, cur_stream->global_params->screen_height);
+                    if (is->global_params->vk_renderer)
+                        vk_renderer_resize(is->global_params->vk_renderer, is->global_params->screen_width, is->global_params->screen_height);
                 case SDL_WINDOWEVENT_EXPOSED:
-                    cur_stream->force_refresh = 1;
+                    is->force_refresh = 1;
             }
             break;
         case SDL_QUIT:
+            /* SDL_QUIT closes all instances */
+            {
+                int count;
+                SDL_LockMutex(g_instance_mutex);
+                count = g_instance_count;
+                SDL_UnlockMutex(g_instance_mutex);
+                /* Shut down all registered instances */
+                while (ffplay_instance_count() > 0) {
+                    VideoState *victim;
+                    SDL_LockMutex(g_instance_mutex);
+                    victim = (g_instance_count > 0) ? g_instances[0].is : NULL;
+                    SDL_UnlockMutex(g_instance_mutex);
+                    if (!victim) break;
+                    ffplay_unregister_instance(victim);
+                    do_exit(victim);
+                }
+                return;
+            }
         case FF_QUIT_EVENT:
-            do_exit(cur_stream);
+            ffplay_unregister_instance(is);
+            do_exit(is);
+            if (ffplay_instance_count() == 0)
+                return;
+            /* If the closed stream was the one we are refreshing, switch to another */
+            if (is == cur_stream) {
+                SDL_LockMutex(g_instance_mutex);
+                cur_stream = (g_instance_count > 0) ? g_instances[0].is : NULL;
+                SDL_UnlockMutex(g_instance_mutex);
+                if (!cur_stream)
+                    return;
+            }
             break;
         default:
             break;
@@ -3857,6 +4066,10 @@ int ffplay(int argc, const char **argv)
 
     init_dynload();
     FFPlayGlobalParams *global_params = av_mallocz(sizeof(FFPlayGlobalParams));
+    if (!global_params) {
+        av_log(NULL, AV_LOG_FATAL, "Could not allocate global params\n");
+        return AVERROR(ENOMEM);
+    }
     global_params->default_width = 640;
     global_params->default_height = 480;
     global_params->screen_left = SDL_WINDOWPOS_CENTERED;
@@ -3891,15 +4104,18 @@ int ffplay(int argc, const char **argv)
     show_banner(argc, argv, options, global_params);
     
     ret = parse_options(global_params, argc, argv, options, opt_input_file);
-    if (ret < 0)
-        exit(ret == AVERROR_EXIT ? 0 : 1);
+    if (ret < 0) {
+        av_freep(&global_params);
+        return ret == AVERROR_EXIT ? 0 : ret;
+    }
 
     if (!global_params->input_filename) {
         show_usage();
         av_log(NULL, AV_LOG_FATAL, "An input file must be specified\n");
         av_log(NULL, AV_LOG_FATAL,
                "Use -h to get full help or, even better, run 'man %s'\n", program_name);
-        exit(1);
+        av_freep(&global_params);
+        return AVERROR(EINVAL);
     }
 
     if (global_params->display_disable) {
@@ -3916,14 +4132,29 @@ int ffplay(int argc, const char **argv)
     }
     if (global_params->display_disable)
         flags &= ~SDL_INIT_VIDEO;
-    if (SDL_Init (flags)) {
-        av_log(NULL, AV_LOG_FATAL, "Could not initialize SDL - %s\n", SDL_GetError());
-        av_log(NULL, AV_LOG_FATAL, "(Did you set the DISPLAY variable?)\n");
-        exit(1);
-    }
 
-    SDL_EventState(SDL_SYSWMEVENT, SDL_IGNORE);
-    SDL_EventState(SDL_USEREVENT, SDL_IGNORE);
+    /* ----------------------------------------------------------------
+     * SDL reference-counting: only call SDL_Init() for the first
+     * instance; subsequent instances reuse the existing SDL context.
+     * ---------------------------------------------------------------- */
+    if (!g_sdl_init_mutex)
+        g_sdl_init_mutex = SDL_CreateMutex();   /* created before any SDL call */
+
+    SDL_LockMutex(g_sdl_init_mutex);
+    if (g_sdl_init_count == 0) {
+        if (SDL_Init(flags)) {
+            SDL_UnlockMutex(g_sdl_init_mutex);
+            av_log(NULL, AV_LOG_FATAL, "Could not initialize SDL - %s\n", SDL_GetError());
+            av_log(NULL, AV_LOG_FATAL, "(Did you set the DISPLAY variable?)\n");
+            av_freep(&global_params);
+            return AVERROR_UNKNOWN;
+        }
+        SDL_EventState(SDL_SYSWMEVENT, SDL_IGNORE);
+        SDL_EventState(SDL_USEREVENT, SDL_IGNORE);
+        ffplay_registry_init();   /* create registry mutex after SDL is up */
+    }
+    g_sdl_init_count++;
+    SDL_UnlockMutex(g_sdl_init_mutex);
 
     if (!global_params->display_disable) {
         int flags = SDL_WINDOW_HIDDEN;
@@ -3961,6 +4192,16 @@ int ffplay(int argc, const char **argv)
         if (!global_params->window) {
             av_log(NULL, AV_LOG_FATAL, "Failed to create window: %s", SDL_GetError());
             do_exit(NULL);
+            SDL_LockMutex(g_sdl_init_mutex);
+            if (--g_sdl_init_count == 0) {
+                SDL_UnlockMutex(g_sdl_init_mutex);
+                ffplay_registry_destroy();
+                SDL_Quit();
+            } else {
+                SDL_UnlockMutex(g_sdl_init_mutex);
+            }
+            av_freep(&global_params);
+            return AVERROR_UNKNOWN;
         }
 
         if (global_params->vk_renderer) {
@@ -3971,6 +4212,8 @@ int ffplay(int argc, const char **argv)
                 if (ret < 0) {
                     av_log(NULL, AV_LOG_FATAL, "Failed to parse, %s\n", global_params->vulkan_params);
                     do_exit(NULL);
+                    av_freep(&global_params);
+                    return ret;
                 }
             }
             ret = vk_renderer_create(global_params->vk_renderer, global_params->window, dict);
@@ -3978,6 +4221,8 @@ int ffplay(int argc, const char **argv)
             if (ret < 0) {
                 av_log(NULL, AV_LOG_FATAL, "Failed to create vulkan renderer, %s\n", av_err2str(ret));
                 do_exit(NULL);
+                av_freep(&global_params);
+                return ret;
             }
         } else {
             global_params->renderer = SDL_CreateRenderer(global_params->window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
@@ -3992,19 +4237,1080 @@ int ffplay(int argc, const char **argv)
             if (!global_params->renderer || !global_params->renderer_info.num_texture_formats) {
                 av_log(NULL, AV_LOG_FATAL, "Failed to create window or renderer: %s", SDL_GetError());
                 do_exit(NULL);
+                av_freep(&global_params);
+                return AVERROR_UNKNOWN;
             }
         }
     }
 
-    is = stream_open(global_params, global_params->input_filename, global_params->file_iformat);
+    is = stream_open(global_params, NULL, global_params->input_filename, global_params->file_iformat);
     if (!is) {
         av_log(NULL, AV_LOG_FATAL, "Failed to initialize VideoState!\n");
         do_exit(NULL);
+        av_freep(&global_params);
+
+        SDL_LockMutex(g_sdl_init_mutex);
+        if (--g_sdl_init_count == 0) {
+            SDL_UnlockMutex(g_sdl_init_mutex);
+            ffplay_registry_destroy();
+            SDL_Quit();
+        } else {
+            SDL_UnlockMutex(g_sdl_init_mutex);
+        }
+        return AVERROR_UNKNOWN;
     }
+
+    /* Register this instance so the shared event_loop can route events to it */
+    if (global_params->window)
+        ffplay_register_instance(SDL_GetWindowID(global_params->window), is);
 
     event_loop(is);
 
-    /* never returns */
+    /* event_loop returns when this (or all) instance(s) quit.
+     * Release the SDL reference held by this call. */
+    SDL_LockMutex(g_sdl_init_mutex);
+    if (--g_sdl_init_count == 0) {
+        SDL_UnlockMutex(g_sdl_init_mutex);
+        avformat_network_deinit();
+        ffplay_registry_destroy();
+        SDL_Quit();
+    } else {
+        SDL_UnlockMutex(g_sdl_init_mutex);
+    }
 
     return 0;
 }
+
+/* ============================================================
+ *  FFPlayer — non-blocking multi-instance player API
+ *
+ *  Design:
+ *    • ffplay_player_create()  allocates + initialises SDL (ref-counted)
+ *                               and creates the SDL window/renderer.
+ *                               Returns an opaque FFPlayer*.
+ *    • ffplay_player_start()   opens the stream, starts decode threads
+ *                               and the shared SDL event thread.
+ *                               Returns immediately (non-blocking).
+ *    • ffplay_player_stop()    signals the stream to stop gracefully.
+ *    • ffplay_player_pause()   toggles pause.
+ *    • ffplay_player_seek()    seeks to position_s (seconds from start).
+ *    • ffplay_player_destroy() waits for threads, frees all resources,
+ *                               decrements SDL ref-count.
+ *
+ *  Thread model:
+ *    A single global SDL event thread (g_event_thread) handles ALL
+ *    registered player instances.  It is created with the first
+ *    ffplay_player_start() call and stays alive until the last
+ *    ffplay_player_destroy() that leaves no more instances.
+ *    
+ *  macOS threading constraints:
+ *    On macOS, all Cocoa UI operations (including SDL_PumpEvents,
+ *    SDL_ShowCursor, window creation/destruction) must occur on the
+ *    main thread.  We therefore use a two-level approach:
+ *      1. On platforms requiring main-thread UI, we require the caller
+ *         to run the SDL event loop via ffplay_player_run_event_loop().
+ *      2. On other platforms, we automatically start an SDL event thread.
+ * ============================================================ */
+
+#define FF_PLAYER_START_EVENT   (SDL_USEREVENT + 3)
+#define FF_PLAYER_STOP_EVENT    (SDL_USEREVENT + 4)
+#define FF_PLAYER_RUN_EVENT_LOOP_EVENT (SDL_USEREVENT + 5)
+
+/* Flag indicating whether we should run SDL event loop on main thread */
+#ifdef __APPLE__
+#define REQUIRE_MAIN_THREAD_UI 1
+#else
+#define REQUIRE_MAIN_THREAD_UI 0
+#endif
+
+/* Internal state for the global SDL event thread */
+static SDL_Thread  *g_event_thread      = NULL;
+static SDL_mutex   *g_event_thread_lock = NULL;  /* serialise create/destroy */
+static int          g_event_thread_quit = 0;     /* set to 1 to stop thread */
+static SDL_cond    *g_event_thread_cond = NULL;  /* used to wait for stop */
+
+/* Main thread ID for platforms requiring main-thread UI */
+static SDL_threadID g_main_thread_id = 0;
+
+/* Helper function to check if we're on the main thread (macOS only) */
+static int is_on_main_thread(void)
+{
+#if REQUIRE_MAIN_THREAD_UI
+    return g_main_thread_id != 0 && SDL_ThreadID() == g_main_thread_id;
+#else
+    return 1; /* On other platforms, any thread is fine */
+#endif
+}
+
+/* The global event thread – handles events for every registered instance.
+ * Used only on non-macOS platforms; on macOS the caller must drive the loop
+ * via ffplay_player_run_event_loop() on the main thread instead. */
+static int sdl_event_thread(void *arg)
+{
+    (void)arg;
+
+#if REQUIRE_MAIN_THREAD_UI
+    /* Should never be reached on macOS – ensure_event_thread_locked won't start us */
+    av_log(NULL, AV_LOG_WARNING,
+           "sdl_event_thread started on macOS – this should not happen. "
+           "Use ffplay_player_run_event_loop() on the main thread.\n");
+    return 0;
+#endif
+
+    SDL_Event event;
+
+    while (1) {
+        /* Check quit flag */
+        SDL_LockMutex(g_event_thread_lock);
+        int quit = g_event_thread_quit;
+        SDL_UnlockMutex(g_event_thread_lock);
+        if (quit) break;
+
+        /* Pick an arbitrary registered instance to drive the wait/refresh cycle.
+         * If no instances are registered we briefly sleep to avoid busy-spin. */
+        SDL_LockMutex(g_instance_mutex);
+        VideoState *driver = (g_instance_count > 0) ? g_instances[0].is : NULL;
+        SDL_UnlockMutex(g_instance_mutex);
+
+        if (!driver) {
+            av_usleep(10000);
+            continue;
+        }
+
+        /* Wait for next event (or next frame deadline) */
+        refresh_loop_wait_event(driver, &event);
+
+        /* Dispatch event to the correct instance */
+        if (dispatch_sdl_event(&event, driver) != 0) {
+            /* SDL_QUIT – signal the thread to exit */
+            SDL_LockMutex(g_event_thread_lock);
+            g_event_thread_quit = 1;
+            SDL_CondBroadcast(g_event_thread_cond);
+            SDL_UnlockMutex(g_event_thread_lock);
+            break;
+        }
+    }
+
+    /* Signal anyone waiting that the thread has exited */
+    SDL_LockMutex(g_event_thread_lock);
+    g_event_thread = NULL;
+    SDL_CondBroadcast(g_event_thread_cond);
+    SDL_UnlockMutex(g_event_thread_lock);
+    return 0;
+}
+
+/* Start the global event thread if it isn't running yet.
+ * Must be called with g_event_thread_lock held.
+ * On macOS, we don't start a separate event thread; instead,
+ * the caller must run the event loop on the main thread. */
+static int ensure_event_thread_locked(void)
+{
+    if (g_event_thread)
+        return 0;   /* already running */
+    
+#if REQUIRE_MAIN_THREAD_UI
+    /* On macOS, we don't create a separate event thread.
+     * The caller must run the event loop via ffplay_player_run_event_loop(). */
+    av_log(NULL, AV_LOG_INFO, "macOS detected: SDL event loop must run on main thread\n");
+    return 0;
+#else
+    g_event_thread_quit = 0;
+    g_event_thread = SDL_CreateThread(sdl_event_thread, "ffplay_event", NULL);
+    if (!g_event_thread) {
+        av_log(NULL, AV_LOG_ERROR,
+               "Failed to create SDL event thread: %s\n", SDL_GetError());
+        return AVERROR(ENOMEM);
+    }
+    return 0;
+#endif
+}
+
+/* ============================================================
+ *  Public FFPlayer opaque handle + API
+ * ============================================================ */
+
+struct FFPlayer {
+    FFPlayGlobalParams  *params;      /* per-instance configuration     */
+    VideoState          *is;          /* per-instance playback state     */
+    int                  started;     /* ffplay_player_start() called?   */
+    int                  destroyed;   /* set to 1 after destroy, prevent double-free */
+    ffplay_loading_callback loading_callback; /* callback for network loading */
+    void                *loading_callback_userdata; /* user data for callback */
+};
+
+/* Implementation of trigger_loading_callback - must be after FFPlayer struct definition */
+static void trigger_loading_callback(VideoState *is, double progress, int buffer_kb)
+{
+    if (!is || !is->player || !is->player->loading_callback)
+        return;
+    
+    /* Call the user's callback */
+    is->player->loading_callback(is->player, progress, buffer_kb, 
+                                is->player->loading_callback_userdata);
+}
+
+/* Shared once-init of SDL + support structures.
+ * Safe to call from multiple threads; uses g_sdl_init_mutex. */
+static int player_sdl_init(int audio_disable, int video_disable)
+{
+    int flags = SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER;
+    if (audio_disable)  flags &= ~SDL_INIT_AUDIO;
+    if (video_disable)  flags &= ~SDL_INIT_VIDEO;
+
+    if (!g_sdl_init_mutex) {
+        /* Bootstrap: create the raw mutex before any SDL call.
+         * On the very first call this is single-threaded so it's safe. */
+        g_sdl_init_mutex = SDL_CreateMutex();
+        if (!g_sdl_init_mutex) return AVERROR(ENOMEM);
+    }
+    if (!g_event_thread_lock) {
+        g_event_thread_lock = SDL_CreateMutex();
+        if (!g_event_thread_lock) return AVERROR(ENOMEM);
+    }
+    if (!g_event_thread_cond) {
+        g_event_thread_cond = SDL_CreateCond();
+        if (!g_event_thread_cond) return AVERROR(ENOMEM);
+    }
+
+    SDL_LockMutex(g_sdl_init_mutex);
+    if (g_sdl_init_count == 0) {
+        if (!SDL_getenv("SDL_AUDIO_ALSA_SET_BUFFER_SIZE"))
+            SDL_setenv("SDL_AUDIO_ALSA_SET_BUFFER_SIZE", "1", 1);
+
+        if (SDL_Init(flags)) {
+            SDL_UnlockMutex(g_sdl_init_mutex);
+            av_log(NULL, AV_LOG_FATAL,
+                   "Could not initialize SDL - %s\n(Did you set DISPLAY?)\n",
+                   SDL_GetError());
+            return AVERROR_UNKNOWN;
+        }
+        SDL_EventState(SDL_SYSWMEVENT, SDL_IGNORE);
+        SDL_EventState(SDL_USEREVENT,  SDL_IGNORE);
+        ffplay_registry_init();
+        
+        /* Record the main thread ID on first SDL initialization */
+        if (REQUIRE_MAIN_THREAD_UI && g_main_thread_id == 0) {
+            g_main_thread_id = SDL_ThreadID();
+            av_log(NULL, AV_LOG_INFO, "SDL initialized on thread %lu (main thread)\n",
+                   (unsigned long)g_main_thread_id);
+        }
+    }
+    g_sdl_init_count++;
+    SDL_UnlockMutex(g_sdl_init_mutex);
+    return 0;
+}
+
+/* Decrement SDL ref-count; tear down SDL when last user leaves. */
+static void player_sdl_unref(void)
+{
+    SDL_LockMutex(g_sdl_init_mutex);
+    int remaining = --g_sdl_init_count;
+    SDL_UnlockMutex(g_sdl_init_mutex);
+
+    if (remaining == 0) {
+        avformat_network_deinit();
+        ffplay_registry_destroy();
+
+        if (g_event_thread_lock) {
+            SDL_LockMutex(g_event_thread_lock);
+            g_event_thread_quit = 1;
+            SDL_CondBroadcast(g_event_thread_cond);
+            /* Wait for the event thread to finish */
+            while (g_event_thread)
+                SDL_CondWait(g_event_thread_cond, g_event_thread_lock);
+            SDL_UnlockMutex(g_event_thread_lock);
+
+            SDL_DestroyMutex(g_event_thread_lock);
+            g_event_thread_lock = NULL;
+            SDL_DestroyCond(g_event_thread_cond);
+            g_event_thread_cond = NULL;
+        }
+
+        SDL_Quit();
+
+        if (g_sdl_init_mutex) {
+            SDL_DestroyMutex(g_sdl_init_mutex);
+            g_sdl_init_mutex = NULL;
+        }
+    }
+}
+
+/* Helper: allocate and populate FFPlayGlobalParams with defaults */
+static FFPlayGlobalParams *alloc_default_params(void)
+{
+    FFPlayGlobalParams *p = av_mallocz(sizeof(FFPlayGlobalParams));
+    if (!p) return NULL;
+    p->default_width       = 640;
+    p->default_height      = 480;
+    p->screen_left         = SDL_WINDOWPOS_CENTERED;
+    p->screen_top          = SDL_WINDOWPOS_CENTERED;
+    p->seek_by_bytes       = -1;
+    p->seek_interval       = 10;
+    p->startup_volume      = 100;
+    p->show_status         = -1;
+    p->av_sync_type        = AV_SYNC_AUDIO_MASTER;
+    p->start_time          = AV_NOPTS_VALUE;
+    p->duration            = AV_NOPTS_VALUE;
+    p->decoder_reorder_pts = -1;
+    p->loop                = 1;
+    p->framedrop           = -1;
+    p->infinite_buffer     = -1;
+    p->show_mode           = SHOW_MODE_NONE;
+    p->autorotate          = 1;
+    p->find_stream_info    = 1;
+    p->rdftspeed           = 0.02;
+    return p;
+}
+
+/* Helper: create SDL window + renderer for the given params */
+static int player_create_window(FFPlayGlobalParams *p)
+{
+    if (p->display_disable)
+        return 0;   /* headless mode – no window needed */
+
+    int win_flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE;
+    if (p->alwaysontop) {
+#if SDL_VERSION_ATLEAST(2,0,5)
+        win_flags |= SDL_WINDOW_ALWAYS_ON_TOP;
+#endif
+    }
+    if (p->borderless)
+        win_flags = (win_flags & ~SDL_WINDOW_RESIZABLE) | SDL_WINDOW_BORDERLESS;
+
+#ifdef SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR
+    SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
+#endif
+
+    if (p->hwaccel && !p->enable_vulkan) {
+        av_log(NULL, AV_LOG_INFO,
+               "Enable vulkan renderer to support hwaccel %s\n", p->hwaccel);
+        p->enable_vulkan = 1;
+    }
+    if (p->enable_vulkan) {
+        p->vk_renderer = vk_get_renderer();
+        if (p->vk_renderer) {
+#if SDL_VERSION_ATLEAST(2,0,6)
+            win_flags |= SDL_WINDOW_VULKAN;
+#endif
+        } else {
+            av_log(NULL, AV_LOG_WARNING,
+                   "Vulkan not available, falling back to SDL renderer\n");
+            p->enable_vulkan = 0;
+        }
+    }
+
+    const char *title = p->window_title ? p->window_title :
+                        (p->input_filename ? p->input_filename : program_name);
+    p->window = SDL_CreateWindow(title,
+                                 SDL_WINDOWPOS_UNDEFINED,
+                                 SDL_WINDOWPOS_UNDEFINED,
+                                 p->default_width, p->default_height,
+                                 win_flags);
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
+    if (!p->window) {
+        av_log(NULL, AV_LOG_FATAL, "Failed to create window: %s\n", SDL_GetError());
+        return AVERROR_UNKNOWN;
+    }
+
+    if (p->vk_renderer) {
+        AVDictionary *dict = NULL;
+        if (p->vulkan_params)
+            av_dict_parse_string(&dict, p->vulkan_params, "=", ":", 0);
+        int ret = vk_renderer_create(p->vk_renderer, p->window, dict);
+        av_dict_free(&dict);
+        if (ret < 0) {
+            av_log(NULL, AV_LOG_FATAL, "Failed to create vulkan renderer: %s\n",
+                   av_err2str(ret));
+            return ret;
+        }
+    } else {
+        p->renderer = SDL_CreateRenderer(p->window, -1,
+                                         SDL_RENDERER_ACCELERATED |
+                                         SDL_RENDERER_PRESENTVSYNC);
+        if (!p->renderer) {
+            av_log(NULL, AV_LOG_WARNING,
+                   "Hardware accelerated renderer failed (%s), trying software\n",
+                   SDL_GetError());
+            p->renderer = SDL_CreateRenderer(p->window, -1, 0);
+        }
+        if (p->renderer)
+            SDL_GetRendererInfo(p->renderer, &p->renderer_info);
+
+        if (!p->renderer || !p->renderer_info.num_texture_formats) {
+            av_log(NULL, AV_LOG_FATAL,
+                   "Failed to create renderer: %s\n", SDL_GetError());
+            return AVERROR_UNKNOWN;
+        }
+    }
+    return 0;
+}
+
+/* ---- Public API ---- */
+
+/**
+ * Create a player instance with default settings.
+ * Caller may adjust params via ffplay_player_set_*() before calling start().
+ * @return opaque handle, or NULL on allocation failure.
+ */
+FFPlayer *ffplay_player_create(void)
+{
+    init_dynload();
+
+#if CONFIG_AVDEVICE
+    avdevice_register_all();
+#endif
+    avformat_network_init();
+
+    FFPlayer *player = av_mallocz(sizeof(FFPlayer));
+    if (!player) return NULL;
+
+    player->params = alloc_default_params();
+    if (!player->params) {
+        av_freep(&player);
+        return NULL;
+    }
+    
+    player->started = 0;
+    player->loading_callback = NULL;
+    player->loading_callback_userdata = NULL;
+    return player;
+}
+
+/**
+ * Set the media URL/path to play.
+ * Must be called before ffplay_player_start().
+ */
+void ffplay_player_set_url(FFPlayer *player, const char *url)
+{
+    if (!player || !url) return;
+    av_freep(&player->params->input_filename);
+    player->params->input_filename = av_strdup(url);
+}
+
+/**
+ * Set window title (optional; defaults to URL basename).
+ */
+void ffplay_player_set_title(FFPlayer *player, const char *title)
+{
+    if (!player || !title) return;
+    /* window_title points into argv, only free if we own it */
+    player->params->window_title = av_strdup(title);
+}
+
+/**
+ * Set preferred window size. 0 means "use video native size".
+ */
+void ffplay_player_set_size(FFPlayer *player, int width, int height)
+{
+    if (!player) return;
+    if (width  > 0) { player->params->screen_width  = width;  player->params->default_width  = width;  }
+    if (height > 0) { player->params->screen_height = height; player->params->default_height = height; }
+}
+
+/**
+ * Enable/disable audio (must be called before start).
+ */
+void ffplay_player_set_audio_disabled(FFPlayer *player, int disabled)
+{
+    if (!player) return;
+    player->params->audio_disable = disabled;
+}
+
+/**
+ * Enable/disable video (must be called before start).
+ */
+void ffplay_player_set_video_disabled(FFPlayer *player, int disabled)
+{
+    if (!player) return;
+    player->params->video_disable = disabled;
+    if (disabled) player->params->display_disable = 1;
+}
+
+/**
+ * Set startup volume [0-100].
+ */
+void ffplay_player_set_volume(FFPlayer *player, int volume)
+{
+    if (!player) return;
+    player->params->startup_volume = av_clip(volume, 0, 100);
+}
+
+/**
+ * Set loop count (0 = infinite, 1 = no loop).
+ */
+void ffplay_player_set_loop(FFPlayer *player, int loop)
+{
+    if (!player) return;
+    player->params->loop = loop;
+}
+
+/**
+ * Set loading callback for network streams.
+ */
+void ffplay_player_set_loading_callback(FFPlayer *player, ffplay_loading_callback callback, void *user_data)
+{
+    if (!player) return;
+    player->loading_callback = callback;
+    player->loading_callback_userdata = user_data;
+}
+
+/**
+ * Start playback.
+ *
+ * Initialises SDL (ref-counted), creates the window/renderer, opens the
+ * media stream and launches decode threads.  A single shared SDL event
+ * thread is started or reused.  This function returns immediately.
+ *
+ * @return 0 on success, negative AVERROR on failure.
+ */
+int ffplay_player_start(FFPlayer *player)
+{
+    if (!player) return AVERROR(EINVAL);
+    if (player->started) return AVERROR(EINVAL);  /* already started */
+
+    FFPlayGlobalParams *p = player->params;
+    if (!p->input_filename) {
+        av_log(NULL, AV_LOG_ERROR, "ffplay_player_start: no URL set\n");
+        return AVERROR(EINVAL);
+    }
+
+    if (p->display_disable)
+        p->video_disable = 1;
+
+    /* Initialise SDL (shared, ref-counted) */
+    int ret = player_sdl_init(p->audio_disable, p->video_disable);
+    if (ret < 0) return ret;
+
+    /* Create the SDL window / renderer for this instance */
+    ret = player_create_window(p);
+    if (ret < 0) {
+        player_sdl_unref();
+        return ret;
+    }
+
+    /* Open the media stream */
+    player->is = stream_open(p, player, p->input_filename, p->file_iformat);
+    if (!player->is) {
+        av_log(NULL, AV_LOG_FATAL, "Failed to open '%s'\n", p->input_filename);
+        if (p->window)   { SDL_DestroyWindow(p->window);   p->window   = NULL; }
+        if (p->renderer) { SDL_DestroyRenderer(p->renderer); p->renderer = NULL; }
+        player_sdl_unref();
+        return AVERROR_UNKNOWN;
+    }
+
+    /* Register in the multi-instance table */
+    if (p->window)
+        ffplay_register_instance(SDL_GetWindowID(p->window), player->is);
+
+    /* Start (or reuse) the global SDL event thread */
+    SDL_LockMutex(g_event_thread_lock);
+    ret = ensure_event_thread_locked();
+    SDL_UnlockMutex(g_event_thread_lock);
+    if (ret < 0) {
+        ffplay_unregister_instance(player->is);
+        stream_close(player->is);
+        player->is = NULL;
+        player_sdl_unref();
+        return ret;
+    }
+
+    player->started = 1;
+    return 0;
+}
+
+/**
+ * Pause or resume playback.
+ * @param paused  1 = pause, 0 = resume, -1 = toggle.
+ */
+void ffplay_player_pause(FFPlayer *player, int paused)
+{
+    if (!player || !player->is) return;
+    VideoState *is = player->is;
+    if (paused == -1) {
+        toggle_pause(is);
+    } else if (paused && !is->paused) {
+        toggle_pause(is);
+    } else if (!paused && is->paused) {
+        toggle_pause(is);
+    }
+}
+
+/**
+ * Seek to position.
+ * @param position_s  Position in seconds from the beginning.
+ */
+void ffplay_player_seek(FFPlayer *player, double position_s)
+{
+    if (!player || !player->is) return;
+    VideoState *is = player->is;
+    int64_t target = (int64_t)(position_s * AV_TIME_BASE);
+    if (is->ic && is->ic->start_time != AV_NOPTS_VALUE)
+        target += is->ic->start_time;
+    stream_seek(is, target, 0, 0);
+}
+
+/**
+ * Seek relative to current position.
+ * @param delta_s  Delta in seconds (positive = forward, negative = backward).
+ */
+void ffplay_player_seek_relative(FFPlayer *player, double delta_s)
+{
+    if (!player || !player->is) return;
+    VideoState *is = player->is;
+    double pos = get_master_clock(is);
+    if (isnan(pos))
+        pos = (double)is->seek_pos / AV_TIME_BASE;
+    pos += delta_s;
+    if (is->ic && is->ic->start_time != AV_NOPTS_VALUE &&
+        pos < is->ic->start_time / (double)AV_TIME_BASE)
+        pos = is->ic->start_time / (double)AV_TIME_BASE;
+    stream_seek(is, (int64_t)(pos * AV_TIME_BASE),
+                    (int64_t)(delta_s * AV_TIME_BASE), 0);
+}
+
+/**
+ * Set playback volume [0-100] while playing.
+ */
+void ffplay_player_set_volume_live(FFPlayer *player, int volume)
+{
+    if (!player || !player->is) return;
+    player->is->audio_volume =
+        av_clip(SDL_MIX_MAXVOLUME * volume / 100, 0, SDL_MIX_MAXVOLUME);
+}
+
+/**
+ * Mute or unmute.
+ */
+void ffplay_player_set_mute(FFPlayer *player, int muted)
+{
+    if (!player || !player->is) return;
+    player->is->muted = muted ? 1 : 0;
+}
+
+/**
+ * Toggle fullscreen.
+ */
+void ffplay_player_toggle_fullscreen(FFPlayer *player)
+{
+    if (!player || !player->is) return;
+    toggle_full_screen(player->is);
+    player->is->force_refresh = 1;
+}
+
+/**
+ * Get current playback position in seconds. Returns NAN if unknown.
+ */
+double ffplay_player_get_position(FFPlayer *player)
+{
+    if (!player || !player->is) return NAN;
+    double pos = get_master_clock(player->is);
+    if (isnan(pos) && player->is->ic)
+        pos = (double)player->is->seek_pos / AV_TIME_BASE;
+    return pos;
+}
+
+/**
+ * Get total duration in seconds. Returns NAN if unknown.
+ */
+double ffplay_player_get_duration(FFPlayer *player)
+{
+    if (!player || !player->is || !player->is->ic) return NAN;
+    int64_t dur = player->is->ic->duration;
+    if (dur == AV_NOPTS_VALUE) return NAN;
+    return (double)dur / AV_TIME_BASE;
+}
+
+/**
+ * Check whether playback has reached end-of-file.
+ */
+int ffplay_player_is_eof(FFPlayer *player)
+{
+    if (!player || !player->is) return 1;
+    VideoState *is = player->is;
+    return is->eof &&
+           (!is->audio_st || (is->auddec.finished == is->audioq.serial &&
+                               frame_queue_nb_remaining(&is->sampq) == 0)) &&
+           (!is->video_st || (is->viddec.finished == is->videoq.serial &&
+                               frame_queue_nb_remaining(&is->pictq) == 0));
+}
+
+/**
+ * Stop playback and release all resources.
+ *
+ * Signals the stream to stop, waits for threads to finish, destroys the
+ * window/renderer, and decrements the SDL ref-count.  Safe to call from
+ * any thread.  After this call player is invalid and must not be used.
+ */
+void ffplay_player_destroy(FFPlayer *player)
+{
+    if (!player) return;
+    if (player->destroyed) return;   /* already destroyed */
+    player->destroyed = 1;
+
+    if (player->started) {
+        VideoState *is = player->is;
+        if (is) {
+            /* The event loop may have already called do_exit() on this instance
+             * (e.g. via FF_QUIT_EVENT).  In that case is->player->is has been
+             * set to NULL by the event-loop path.  Only call do_exit() if the
+             * VideoState is still alive (i.e. still registered). */
+            ffplay_unregister_instance(is);   /* safe to call even if not registered */
+            do_exit(is);
+            player->is = NULL;
+        }
+        player_sdl_unref();
+    } else if (player->params) {
+        /* Never started – only free params */
+        FFPlayGlobalParams *p = player->params;
+        uninit_opts(p);
+        for (int i = 0; i < p->nb_vfilters; i++)
+            av_freep(&p->vfilters_list[i]);
+        av_freep(&p->vfilters_list);
+        av_freep(&p->input_filename);
+        av_freep(&p->video_codec_name);
+        av_freep(&p->audio_codec_name);
+        av_freep(&p->subtitle_codec_name);
+        av_freep(&player->params);
+    }
+
+    av_freep(&player);
+}
+
+/**
+ * Dispatch a single SDL event to the correct VideoState.
+ * Shared by both the background sdl_event_thread and the main-thread
+ * ffplay_player_run_event_loop so that key/mouse/window handling is
+ * identical regardless of which code path is active.
+ *
+ * @param event   The SDL event to handle.
+ * @param driver  Fallback VideoState when the event carries no windowID.
+ * @return  0 normally; 1 if a global SDL_QUIT was received (caller should stop).
+ */
+static int dispatch_sdl_event(SDL_Event *event, VideoState *driver)
+{
+    VideoState *is = NULL;
+    double incr, pos, frac, x;
+
+    /* ---- resolve target instance from windowID ---- */
+    switch (event->type) {
+    case SDL_WINDOWEVENT:
+        is = ffplay_find_instance_by_window(event->window.windowID);
+        if (!is) is = driver;
+        break;
+    case SDL_KEYDOWN:
+    case SDL_KEYUP:
+        is = ffplay_find_instance_by_window(event->key.windowID);
+        if (!is) is = driver;
+        break;
+    case SDL_MOUSEBUTTONDOWN:
+    case SDL_MOUSEBUTTONUP:
+        is = ffplay_find_instance_by_window(event->button.windowID);
+        if (!is) is = driver;
+        break;
+    case SDL_MOUSEMOTION:
+        is = ffplay_find_instance_by_window(event->motion.windowID);
+        if (!is) is = driver;
+        break;
+    case FF_QUIT_EVENT:
+    case FF_PLAYER_STOP_EVENT:
+        is = (VideoState *)event->user.data1;
+        if (!is) is = driver;
+        break;
+    default:
+        is = driver;
+        break;
+    }
+
+    /* ---- handle event ---- */
+    switch (event->type) {
+    case SDL_KEYDOWN:
+        if (!is) break;
+        if (is->global_params->exit_on_keydown ||
+            event->key.keysym.sym == SDLK_ESCAPE ||
+            event->key.keysym.sym == SDLK_q) {
+            ffplay_unregister_instance(is);
+            do_exit(is);
+            break;
+        }
+        if (!is->width)
+            break;
+        switch (event->key.keysym.sym) {
+        case SDLK_f:
+            toggle_full_screen(is);
+            is->force_refresh = 1;
+            break;
+        case SDLK_p:
+        case SDLK_SPACE:
+            toggle_pause(is);
+            break;
+        case SDLK_m:
+            toggle_mute(is);
+            break;
+        case SDLK_KP_MULTIPLY:
+        case SDLK_0:
+            update_volume(is, 1, SDL_VOLUME_STEP);
+            break;
+        case SDLK_KP_DIVIDE:
+        case SDLK_9:
+            update_volume(is, -1, SDL_VOLUME_STEP);
+            break;
+        case SDLK_s:
+            step_to_next_frame(is);
+            break;
+        case SDLK_a:
+            stream_cycle_channel(is, AVMEDIA_TYPE_AUDIO);
+            break;
+        case SDLK_v:
+            stream_cycle_channel(is, AVMEDIA_TYPE_VIDEO);
+            break;
+        case SDLK_c:
+            stream_cycle_channel(is, AVMEDIA_TYPE_VIDEO);
+            stream_cycle_channel(is, AVMEDIA_TYPE_AUDIO);
+            stream_cycle_channel(is, AVMEDIA_TYPE_SUBTITLE);
+            break;
+        case SDLK_t:
+            stream_cycle_channel(is, AVMEDIA_TYPE_SUBTITLE);
+            break;
+        case SDLK_w:
+            if (is->show_mode == SHOW_MODE_VIDEO &&
+                is->vfilter_idx < is->global_params->nb_vfilters - 1) {
+                if (++is->vfilter_idx >= is->global_params->nb_vfilters)
+                    is->vfilter_idx = 0;
+            } else {
+                is->vfilter_idx = 0;
+                toggle_audio_display(is);
+            }
+            break;
+        case SDLK_PAGEUP:
+            if (is->ic->nb_chapters <= 1) { incr = 600.0; goto ev_seek; }
+            seek_chapter(is, 1); break;
+        case SDLK_PAGEDOWN:
+            if (is->ic->nb_chapters <= 1) { incr = -600.0; goto ev_seek; }
+            seek_chapter(is, -1); break;
+        case SDLK_LEFT:
+            incr = is->global_params->seek_interval ? -is->global_params->seek_interval : -10.0;
+            goto ev_seek;
+        case SDLK_RIGHT:
+            incr = is->global_params->seek_interval ?  is->global_params->seek_interval :  10.0;
+            goto ev_seek;
+        case SDLK_UP:   incr =  60.0; goto ev_seek;
+        case SDLK_DOWN: incr = -60.0;
+        ev_seek:
+            if (is->global_params->seek_by_bytes) {
+                pos = -1;
+                if (pos < 0 && is->video_stream >= 0)
+                    pos = frame_queue_last_pos(&is->pictq);
+                if (pos < 0 && is->audio_stream >= 0)
+                    pos = frame_queue_last_pos(&is->sampq);
+                if (pos < 0)
+                    pos = avio_tell(is->ic->pb);
+                if (is->ic->bit_rate) incr *= is->ic->bit_rate / 8.0;
+                else                  incr *= 180000.0;
+                pos += incr;
+                stream_seek(is, pos, incr, 1);
+            } else {
+                pos = get_master_clock(is);
+                if (isnan(pos)) pos = (double)is->seek_pos / AV_TIME_BASE;
+                pos += incr;
+                if (is->ic->start_time != AV_NOPTS_VALUE &&
+                    pos < is->ic->start_time / (double)AV_TIME_BASE)
+                    pos = is->ic->start_time / (double)AV_TIME_BASE;
+                stream_seek(is, (int64_t)(pos * AV_TIME_BASE),
+                                (int64_t)(incr * AV_TIME_BASE), 0);
+            }
+            break;
+        default:
+            break;
+        }
+        break;
+
+    case SDL_MOUSEBUTTONDOWN:
+        if (!is) break;
+        if (is->global_params->exit_on_mousedown) {
+            ffplay_unregister_instance(is);
+            do_exit(is);
+            break;
+        }
+        if (event->button.button == SDL_BUTTON_LEFT) {
+            static int64_t last_mouse_left_click = 0;
+            if (av_gettime_relative() - last_mouse_left_click <= 500000) {
+                toggle_full_screen(is);
+                is->force_refresh = 1;
+                last_mouse_left_click = 0;
+            } else {
+                last_mouse_left_click = av_gettime_relative();
+            }
+        }
+        /* fall-through */
+    case SDL_MOUSEMOTION:
+        if (!is) break;
+        if (is->global_params->cursor_hidden) {
+            SDL_ShowCursor(1);
+            is->global_params->cursor_hidden = 0;
+        }
+        is->global_params->cursor_last_shown = av_gettime_relative();
+        if (event->type == SDL_MOUSEBUTTONDOWN) {
+            if (event->button.button != SDL_BUTTON_RIGHT) break;
+            x = event->button.x;
+        } else {
+            if (!(event->motion.state & SDL_BUTTON_RMASK)) break;
+            x = event->motion.x;
+        }
+        if (is->global_params->seek_by_bytes || is->ic->duration <= 0) {
+            uint64_t size = avio_size(is->ic->pb);
+            stream_seek(is, size * x / is->width, 0, 1);
+        } else {
+            int64_t ts;
+            int ns, hh, mm, ss;
+            int tns, thh, tmm, tss;
+            tns  = is->ic->duration / 1000000LL;
+            thh  = tns / 3600; tmm = (tns % 3600) / 60; tss = tns % 60;
+            frac = x / is->width;
+            ns   = frac * tns;
+            hh   = ns / 3600; mm = (ns % 3600) / 60; ss = ns % 60;
+            av_log(NULL, AV_LOG_INFO,
+                   "Seek to %2.0f%% (%2d:%02d:%02d) of total duration "
+                   "(%2d:%02d:%02d)       \n",
+                   frac * 100, hh, mm, ss, thh, tmm, tss);
+            ts = frac * is->ic->duration;
+            if (is->ic->start_time != AV_NOPTS_VALUE)
+                ts += is->ic->start_time;
+            stream_seek(is, ts, 0, 0);
+        }
+        break;
+
+    case SDL_WINDOWEVENT:
+        if (!is) break;
+        switch (event->window.event) {
+        case SDL_WINDOWEVENT_SIZE_CHANGED:
+            is->global_params->screen_width  = is->width  = event->window.data1;
+            is->global_params->screen_height = is->height = event->window.data2;
+            if (is->vis_texture) {
+                SDL_DestroyTexture(is->vis_texture);
+                is->vis_texture = NULL;
+            }
+            if (is->global_params->vk_renderer)
+                vk_renderer_resize(is->global_params->vk_renderer,
+                                   is->global_params->screen_width,
+                                   is->global_params->screen_height);
+            /* fall-through */
+        case SDL_WINDOWEVENT_EXPOSED:
+            is->force_refresh = 1;
+            break;
+        }
+        break;
+
+    case SDL_QUIT:
+        /* Shut down every registered instance */
+        while (ffplay_instance_count() > 0) {
+            VideoState *victim;
+            SDL_LockMutex(g_instance_mutex);
+            victim = (g_instance_count > 0) ? g_instances[0].is : NULL;
+            SDL_UnlockMutex(g_instance_mutex);
+            if (!victim) break;
+            ffplay_unregister_instance(victim);
+            do_exit(victim);
+        }
+        return 1;   /* signal caller to stop */
+
+    case FF_QUIT_EVENT:
+    case FF_PLAYER_STOP_EVENT:
+        if (is) {
+            ffplay_unregister_instance(is);
+            do_exit(is);
+        }
+        break;
+
+    default:
+        break;
+    }
+    return 0;
+}
+
+/**
+ * Run SDL event loop for a short period (non-blocking).
+ *
+ * On macOS, SDL requires all UI operations to occur on the main thread.
+ * This function MUST therefore be called from the main thread on macOS.
+ * On other platforms it may be called from any thread (the background
+ * event thread calls it automatically).
+ *
+ * Multiple player instances are fully supported: a single call to this
+ * function processes events for ALL currently registered instances and
+ * refreshes every active video surface.  Simply create and start as many
+ * FFPlayer handles as needed; they all share this one event pump.
+ *
+ * @param timeout_ms  How long to sleep after processing events (milliseconds).
+ *                    Pass 0 for fully non-blocking, or a small value (e.g. 10)
+ *                    to cap CPU use while keeping latency low.
+ * @return  1 if there are still active player instances (keep calling),
+ *          0 if all instances have been destroyed / closed.
+ */
+int ffplay_player_run_event_loop(int timeout_ms)
+{
+    /* Nothing to do if no instances are registered */
+    if (ffplay_instance_count() == 0)
+        return 0;
+
+    /* On macOS, ensure we're on the main thread */
+#if REQUIRE_MAIN_THREAD_UI
+    if (!is_on_main_thread()) {
+        av_log(NULL, AV_LOG_ERROR,
+               "ffplay_player_run_event_loop: must be called from the main thread on macOS\n");
+        return 0;
+    }
+#endif
+
+    /* ---- pick a driver instance for event dispatch fallback ---- */
+    SDL_LockMutex(g_instance_mutex);
+    VideoState *driver = (g_instance_count > 0) ? g_instances[0].is : NULL;
+    SDL_UnlockMutex(g_instance_mutex);
+
+    if (!driver)
+        return 0;
+
+    SDL_Event event;
+
+    /* Pump OS events into the SDL queue (MUST be main-thread on macOS) */
+    SDL_PumpEvents();
+
+    /* Drain all queued events (non-blocking) */
+    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT) > 0) {
+        if (dispatch_sdl_event(&event, driver) != 0)
+            return 0; /* global quit */
+
+        /* After handling the event, re-acquire driver (it might have been destroyed) */
+        SDL_LockMutex(g_instance_mutex);
+        driver = (g_instance_count > 0) ? g_instances[0].is : NULL;
+        SDL_UnlockMutex(g_instance_mutex);
+        if (!driver)
+            return 0;
+    }
+
+    /* Refresh all registered instances once (non-blocking) */
+    double remaining_time = 0.0;
+    SDL_LockMutex(g_instance_mutex);
+    int cnt = g_instance_count;
+    VideoState *snaps[FFPLAY_MAX_INSTANCES];
+    for (int i = 0; i < cnt; i++)
+        snaps[i] = g_instances[i].is;
+    SDL_UnlockMutex(g_instance_mutex);
+
+    for (int i = 0; i < cnt; i++) {
+        if (snaps[i] &&
+            snaps[i]->show_mode != SHOW_MODE_NONE &&
+            (!snaps[i]->paused || snaps[i]->force_refresh))
+            video_refresh(snaps[i], &remaining_time);
+    }
+
+    /* IMPORTANT (macOS):
+     * This API is designed as a UI-thread "tick". Never block here waiting for events
+     * (do NOT call refresh_loop_wait_event()). If you want to cap CPU, pass a small
+     * timeout_ms (e.g. 1~10) and call this from a timer.
+     */
+    if (timeout_ms > 0)
+        av_usleep((int64_t)timeout_ms * 1000LL);
+
+    return ffplay_instance_count() > 0;
+}
+

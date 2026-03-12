@@ -23,46 +23,132 @@
  * simple media player based on the FFmpeg libraries
  */
 
-#include "config.h"
-#include "config_components.h"
-#include <math.h>
-#include <limits.h>
-#include <signal.h>
-#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-#include "libavutil/avstring.h"
-#include "libavutil/channel_layout.h"
-#include "libavutil/mathematics.h"
-#include "libavutil/mem.h"
-#include "libavutil/pixdesc.h"
-#include "libavutil/dict.h"
-#include "libavutil/fifo.h"
-#include "libavutil/parseutils.h"
-#include "libavutil/samplefmt.h"
-#include "libavutil/time.h"
-#include "libavutil/bprint.h"
-#include "libavformat/avformat.h"
-#include "libavdevice/avdevice.h"
-#include "libswscale/swscale.h"
-#include "libavutil/opt.h"
-#include "libavutil/tx.h"
-#include "libswresample/swresample.h"
-
-#include "libavfilter/avfilter.h"
-#include "libavfilter/buffersink.h"
-#include "libavfilter/buffersrc.h"
-
-#include <SDL.h>
-#include <SDL_thread.h>
-
-#include "cmdutils.h"
-#include "ffplay_renderer.h"
-#include "opt_common.h"
 #include "ffplay_jni.h"
 
 /* Called from the main */
 int main(int argc, char **argv)
 {
-    ffplay(argc, argv);
-    return 0;
+    /*
+     * Multi-instance test mode:
+     *   ffplay -multi <url1> <url2> ...
+     *   ffplay -multi <N> <url>
+     *
+     * Notes:
+     *   - Each URL opens in its own SDL window.
+     *   - Keyboard/mouse events are routed by SDL windowID, so controls work per-window.
+     *   - On macOS the event pump MUST run on the main thread; we drive it here via
+     *     ffplay_player_run_event_loop() in a tight "tick" loop.
+     */
+    if (argc >= 2 && !strcmp(argv[1], "-multi")) {
+        int first_url_arg = 2;
+        int count = 0;
+
+        if (argc < 3) {
+            fprintf(stderr, "Usage: %s -multi <url1> <url2> ...\n", argv[0]);
+            fprintf(stderr, "   or: %s -multi <N> <url>\n", argv[0]);
+            return 1;
+        }
+
+        /* If argv[2] is a positive integer and there is exactly one url after it,
+         * treat it as repeat-count mode. */
+        char *endptr = NULL;
+        long n = strtol(argv[2], &endptr, 10);
+        if (endptr && *endptr == '\0' && n > 0 && argc >= 4) {
+            count = (int)n;
+            first_url_arg = 3;
+        } else {
+            count = argc - 2;
+            first_url_arg = 2;
+        }
+
+        FFPlayer **players = (FFPlayer **)calloc((size_t)count, sizeof(*players));
+        if (!players) {
+            fprintf(stderr, "Out of memory\n");
+            return 1;
+        }
+
+        int started = 0;
+        for (int i = 0; i < count; i++) {
+            const char *url = (first_url_arg + i < argc) ? argv[first_url_arg + i] : argv[first_url_arg];
+
+            players[i] = ffplay_player_create();
+            if (!players[i]) {
+                fprintf(stderr, "Failed to create player %d\n", i);
+                continue;
+            }
+
+            ffplay_player_set_url(players[i], url);
+
+            char title[256];
+            snprintf(title, sizeof(title), "FFPlayer #%d", i);
+            ffplay_player_set_title(players[i], title);
+
+            /* Stagger sizes a bit to make it obvious they're independent */
+            ffplay_player_set_size(players[i], 640 + (i % 3) * 80, 360 + (i % 3) * 45);
+
+            int ret = ffplay_player_start(players[i]);
+            if (ret < 0) {
+                fprintf(stderr, "Failed to start player %d: %d\n", i, ret);
+                ffplay_player_destroy(players[i]);
+                players[i] = NULL;
+                continue;
+            }
+            started++;
+        }
+
+        if (started == 0) {
+            fprintf(stderr, "No player started\n");
+            free(players);
+            return 1;
+        }
+
+        /* Main-thread tick: returns 0 when no instances remain */
+        while (ffplay_player_run_event_loop(1) > 0) {
+            /* noop */
+        }
+
+        /* Cleanup (safe even if instances already closed themselves) */
+        for (int i = 0; i < count; i++) {
+            if (players[i])
+                ffplay_player_destroy(players[i]);
+        }
+        free(players);
+        return 0;
+    }
+
+    /* Keep the original single-instance test (no args) for convenience */
+    if (argc == 1) {
+        FFPlayer *player = ffplay_player_create();
+        if (!player) {
+            fprintf(stderr, "Failed to create player\n");
+            return 1;
+        }
+
+        /* NOTE: hardcoded path kept from previous test; change as needed. */
+        ffplay_player_set_url(player,
+                              "/Users/wangyaqiang/Downloads/xxxs/un-bt709-bt470bg/706x576-un-bt709-bt470bg.mp4");
+        ffplay_player_set_title(player, "Test Player");
+        ffplay_player_set_size(player, 800, 600);
+
+        int ret = ffplay_player_start(player);
+        if (ret < 0) {
+            fprintf(stderr, "Failed to start player: %d\n", ret);
+            ffplay_player_destroy(player);
+            return 1;
+        }
+
+        while (ffplay_player_run_event_loop(1) > 0) {
+            /* noop */
+        }
+
+        ffplay_player_destroy(player);
+        return 0;
+    }
+
+    /* Use the legacy blocking CLI */
+    return ffplay(argc, (const char **)argv);
 }
