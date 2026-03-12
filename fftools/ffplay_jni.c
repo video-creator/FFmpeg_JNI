@@ -355,6 +355,7 @@ static SDL_mutex *g_sdl_init_mutex = NULL;   /* needs to be created before SDL_I
 
 /* ============================================================ */
 struct FFPlayGlobalParams {
+    struct FFGlobalParam *gp; //ffprobe /ffplay/ffmpeg共用
     /* options specified by the user */
     AVInputFormat* file_iformat;
     char* input_filename;
@@ -4942,12 +4943,9 @@ int ffplay_player_start(FFPlayer *player)
     player->is = stream_open(p, player, p->input_filename, p->file_iformat);
     if (!player->is) {
         av_log(NULL, AV_LOG_FATAL, "Failed to open '%s'\n", p->input_filename);
-
-        /* stream_open failed before creating VideoState, safe to cleanup window/renderer */
-        if (p->renderer) { SDL_DestroyRenderer(p->renderer); p->renderer = NULL; }
-        if (p->vk_renderer) { vk_renderer_destroy(p->vk_renderer); p->vk_renderer = NULL; }
-        if (p->window)   { SDL_DestroyWindow(p->window);   p->window   = NULL; }
-
+        /* stream_open failed before creating VideoState.
+         * Don't free window/renderer here - let ffplay_player_destroy handle cleanup.
+         * Just decrement SDL ref count and return error. */
         player_sdl_unref();
         return AVERROR_UNKNOWN;
     }
