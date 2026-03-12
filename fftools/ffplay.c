@@ -45,6 +45,81 @@ static void ffplay_loading_cb(FFPlayer *p, double progress, int buffer_kb, void 
 /* Called from the main */
 int main(int argc, char **argv)
 {
+    /* Test options parsing mode:
+     *   ffplay -test_options <url>
+     *
+     * This mode tests ffplay_player_parse_options() and ffplay_player_set_option()
+     * functions by applying various options before playback.
+     */
+    if (argc >= 2 && !strcmp(argv[1], "-test_options")) {
+        if (argc < 3) {
+            fprintf(stderr, "Usage: %s -test_options <url>\n", argv[0]);
+            return 1;
+        }
+
+        const char *url = argv[2];
+        fprintf(stderr, "=== Testing option parsing with URL: %s ===\n", url);
+
+        FFPlayer *player = ffplay_player_create();
+        if (!player) {
+            fprintf(stderr, "Failed to create player\n");
+            return 1;
+        }
+
+        /* Test 1: ffplay_player_set_option for individual options */
+        fprintf(stderr, "\n[Test 1] Testing ffplay_player_set_option...\n");
+
+        int ret = ffplay_player_set_option(player, "autoexit", NULL);
+        fprintf(stderr, "  set_option('autoexit', NULL) -> %d (expected: 0, no arg consumed)\n", ret);
+
+        ret = ffplay_player_set_option(player, "loop", "2");
+        fprintf(stderr, "  set_option('loop', '1') -> %d (expected: 1, arg consumed)\n", ret);
+
+        ret = ffplay_player_set_option(player, "volume", "75");
+        fprintf(stderr, "  set_option('volume', '75') -> %d (expected: 1, arg consumed)\n", ret);
+
+        ret = ffplay_player_set_option(player, "seek_interval", "5");
+        fprintf(stderr, "  set_option('seek_interval', '5') -> %d (expected: 1, arg consumed)\n", ret);
+
+        /* Test 2: ffplay_player_parse_options for array of options */
+        fprintf(stderr, "\n[Test 2] Testing ffplay_player_parse_options...\n");
+
+        const char *opts[] = {
+            "-framedrop",           /* boolean option */
+            "-window_title", "OptionTest",  /* string option */
+            "-bytes", "-1",        /* integer option */
+        };
+        int opts_count = sizeof(opts) / sizeof(opts[0]);
+
+        ret = ffplay_player_parse_options(player, opts_count, opts);
+        fprintf(stderr, "  parse_options({-framedrop, -window_title OptionTest, -bytes -1}) -> %d\n", ret);
+
+        /* Test 3: Set URL and start playback */
+        fprintf(stderr, "\n[Test 3] Starting playback...\n");
+
+        ffplay_player_set_url(player, url);
+        ffplay_player_set_size(player, 640, 480);
+
+        ret = ffplay_player_start(player);
+        if (ret < 0) {
+            fprintf(stderr, "Failed to start player: %d\n", ret);
+            ffplay_player_destroy(player);
+            return 1;
+        }
+
+        fprintf(stderr, "Playback started. Options applied successfully.\n");
+        fprintf(stderr, "Press 'q' to quit.\n\n");
+
+        /* Run event loop until EOF or user quits */
+        while (ffplay_player_run_event_loop(1) > 0) {
+            /* noop */
+        }
+
+        ffplay_player_destroy(player);
+        fprintf(stderr, "\n=== Option parsing test completed ===\n");
+        return 0;
+    }
+
     /*
      * Multi-instance test mode:
      *   ffplay -multi <url1> <url2> ...

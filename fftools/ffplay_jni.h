@@ -99,6 +99,40 @@ void ffplay_player_set_volume(FFPlayer *player, int volume);
 void ffplay_player_set_loop(FFPlayer *player, int loop);
 
 /**
+ * Parse ffplay command-line options and apply to player.
+ * This allows setting any option that the ffplay command supports.
+ * Must be called before ffplay_player_start().
+ *
+ * @param argc  Number of arguments (excluding the program name)
+ * @param argv  Array of argument strings (e.g., {"-autoexit", "-loop", "0"})
+ * @return 0 on success, negative AVERROR on failure.
+ *
+ * Example:
+ * @code
+ *   const char *opts[] = {"-autoexit", "-loop", "0", "-an"};
+ *   ffplay_player_parse_options(player, 4, opts);
+ * @endcode
+ */
+int ffplay_player_parse_options(FFPlayer *player, int argc, const char **argv);
+
+/**
+ * Set a single ffplay option by name.
+ * Must be called before ffplay_player_start().
+ *
+ * @param name   Option name (without leading dash, e.g., "autoexit", "loop")
+ * @param value  Option value as string, or NULL for boolean options
+ * @return 0 on success, negative AVERROR on failure.
+ *
+ * Example:
+ * @code
+ *   ffplay_player_set_option(player, "autoexit", NULL);    // -autoexit
+ *   ffplay_player_set_option(player, "loop", "0");         // -loop 0
+ *   ffplay_player_set_option(player, "volume", "50");      // -volume 50
+ * @endcode
+ */
+int ffplay_player_set_option(FFPlayer *player, const char *name, const char *value);
+
+/**
  * Set loading callback for network streams.
  * @param callback  Callback function (can be NULL to disable)
  * @param user_data User data passed to callback

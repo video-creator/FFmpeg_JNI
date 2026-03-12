@@ -4135,38 +4135,38 @@ static const OptionDef options[] = {
     { "alwaysontop",        OPT_TYPE_BOOL,            OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(alwaysontop) }, "window always on top" },
     { "volume",             OPT_TYPE_INT,             OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(startup_volume)}, "set startup volume 0=min 100=max", "volume" },
     { "f",                  OPT_TYPE_FUNC, OPT_FUNC_ARG, { .func_arg = opt_format }, "force format", "fmt" },
-    { "stats",              OPT_TYPE_BOOL,   OPT_EXPERT, { .off       = OFFSET(show_status) }, "show status", "" },
-    { "fast",               OPT_TYPE_BOOL,   OPT_EXPERT, { .off       = OFFSET(fast) }, "non spec compliant optimizations", "" },
-    { "genpts",             OPT_TYPE_BOOL,   OPT_EXPERT, { .off       = OFFSET(genpts) }, "generate pts", "" },
-    { "drp",                OPT_TYPE_INT,    OPT_EXPERT, { .off       = OFFSET(decoder_reorder_pts) }, "let decoder reorder pts 0=off 1=on -1=auto", ""},
-    { "lowres",             OPT_TYPE_INT,    OPT_EXPERT, { .off       = OFFSET(lowres) }, "", "" },
+    { "stats",              OPT_TYPE_BOOL,   OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(show_status) }, "show status", "" },
+    { "fast",               OPT_TYPE_BOOL,   OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(fast) }, "non spec compliant optimizations", "" },
+    { "genpts",             OPT_TYPE_BOOL,   OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(genpts) }, "generate pts", "" },
+    { "drp",                OPT_TYPE_INT,    OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(decoder_reorder_pts) }, "let decoder reorder pts 0=off 1=on -1=auto", ""},
+    { "lowres",             OPT_TYPE_INT,    OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(lowres) }, "", "" },
     { "sync",               OPT_TYPE_FUNC, OPT_FUNC_ARG | OPT_EXPERT, { .func_arg = opt_sync }, "set audio-video sync. type (type=audio/video/ext)", "type" },
-    { "autoexit",           OPT_TYPE_BOOL,   OPT_EXPERT, { .off       = OFFSET(autoexit) }, "exit at the end", "" },
-    { "exitonkeydown",      OPT_TYPE_BOOL,   OPT_EXPERT, { .off       = OFFSET(exit_on_keydown) }, "exit on key down", "" },
-    { "exitonmousedown",    OPT_TYPE_BOOL,   OPT_EXPERT, { .off       = OFFSET(exit_on_mousedown) }, "exit on mouse down", "" },
-    { "loop",               OPT_TYPE_INT,    OPT_EXPERT, { .off       = OFFSET(loop) }, "set number of times the playback shall be looped", "loop count" },
-    { "framedrop",          OPT_TYPE_BOOL,   OPT_EXPERT, { .off       = OFFSET(framedrop) }, "drop frames when cpu is too slow", "" },
-    { "infbuf",             OPT_TYPE_BOOL,   OPT_EXPERT, { .off       = OFFSET(infinite_buffer) }, "don't limit the input buffer size (useful with realtime streams)", "" },
+    { "autoexit",           OPT_TYPE_BOOL,   OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(autoexit) }, "exit at the end", "" },
+    { "exitonkeydown",      OPT_TYPE_BOOL,   OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(exit_on_keydown) }, "exit on key down", "" },
+    { "exitonmousedown",    OPT_TYPE_BOOL,   OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(exit_on_mousedown) }, "exit on mouse down", "" },
+    { "loop",               OPT_TYPE_INT,    OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(loop) }, "set number of times the playback shall be looped", "loop count" },
+    { "framedrop",          OPT_TYPE_BOOL,   OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(framedrop) }, "drop frames when cpu is too slow", "" },
+    { "infbuf",             OPT_TYPE_BOOL,   OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(infinite_buffer) }, "don't limit the input buffer size (useful with realtime streams)", "" },
     { "window_title",       OPT_TYPE_STRING,          OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(window_title) }, "set window title", "window title" },
-    { "left",               OPT_TYPE_INT,    OPT_EXPERT, { .off       = OFFSET(screen_left) }, "set the x position for the left of the window", "x pos" },
-    { "top",                OPT_TYPE_INT,    OPT_EXPERT, { .off       = OFFSET(screen_top) }, "set the y position for the top of the window", "y pos" },
+    { "left",               OPT_TYPE_INT,    OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(screen_left) }, "set the x position for the left of the window", "x pos" },
+    { "top",                OPT_TYPE_INT,    OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(screen_top) }, "set the y position for the top of the window", "y pos" },
     { "vf",                 OPT_TYPE_FUNC, OPT_FUNC_ARG | OPT_EXPERT, { .func_arg = opt_add_vfilter }, "set video filters", "filter_graph" },
     { "af",                 OPT_TYPE_STRING,          OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(afilters) }, "set audio filters", "filter_graph" },
-    { "rdftspeed",          OPT_TYPE_INT, OPT_AUDIO | OPT_EXPERT, { .off       = OFFSET(rdftspeed) }, "rdft speed", "msecs" },
+    { "rdftspeed",          OPT_TYPE_INT, OPT_AUDIO | OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(rdftspeed) }, "rdft speed", "msecs" },
     { "showmode",           OPT_TYPE_FUNC, OPT_FUNC_ARG, { .func_arg = opt_show_mode}, "select show mode (0 = video, 1 = waves, 2 = RDFT)", "mode" },
     { "i",                  OPT_TYPE_BOOL,            OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(dummy)}, "read specified file", "input_file"},
     { "codec",              OPT_TYPE_FUNC, OPT_FUNC_ARG, { .func_arg = opt_codec}, "force decoder", "decoder_name" },
-    { "acodec",             OPT_TYPE_STRING, OPT_EXPERT, {    .off       = OFFSET(audio_codec_name) }, "force audio decoder",    "decoder_name" },
-    { "scodec",             OPT_TYPE_STRING, OPT_EXPERT, { .off       = OFFSET(subtitle_codec_name) }, "force subtitle decoder", "decoder_name" },
-    { "vcodec",             OPT_TYPE_STRING, OPT_EXPERT, {    .off       = OFFSET(video_codec_name) }, "force video decoder",    "decoder_name" },
+    { "acodec",             OPT_TYPE_STRING, OPT_EXPERT | OPT_FLAG_OFFSET, {    .off       = OFFSET(audio_codec_name) }, "force audio decoder",    "decoder_name" },
+    { "scodec",             OPT_TYPE_STRING, OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(subtitle_codec_name) }, "force subtitle decoder", "decoder_name" },
+    { "vcodec",             OPT_TYPE_STRING, OPT_EXPERT | OPT_FLAG_OFFSET, {    .off       = OFFSET(video_codec_name) }, "force video decoder",    "decoder_name" },
     { "autorotate",         OPT_TYPE_BOOL,            OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(autorotate) }, "automatically rotate video", "" },
-    { "find_stream_info",   OPT_TYPE_BOOL, OPT_INPUT | OPT_EXPERT, { .off       = OFFSET(find_stream_info) },
+    { "find_stream_info",   OPT_TYPE_BOOL, OPT_INPUT | OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(find_stream_info) },
         "read and decode the streams to fill missing information with heuristics" },
-    { "filter_threads",     OPT_TYPE_INT,    OPT_EXPERT, { .off       = OFFSET(filter_nbthreads) }, "number of filter threads per graph" },
+    { "filter_threads",     OPT_TYPE_INT,    OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(filter_nbthreads) }, "number of filter threads per graph" },
     { "enable_vulkan",      OPT_TYPE_BOOL,            OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(enable_vulkan) }, "enable vulkan renderer" },
-    { "vulkan_params",      OPT_TYPE_STRING, OPT_EXPERT, { .off       = OFFSET(vulkan_params) }, "vulkan configuration using a list of key=value pairs separated by ':'" },
-    { "video_bg",           OPT_TYPE_STRING, OPT_EXPERT, { .off       = OFFSET(video_background) }, "set video background for transparent videos" },
-    { "hwaccel",            OPT_TYPE_STRING, OPT_EXPERT, { .off       = OFFSET(hwaccel) }, "use HW accelerated decoding" },
+    { "vulkan_params",      OPT_TYPE_STRING, OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(vulkan_params) }, "vulkan configuration using a list of key=value pairs separated by ':'" },
+    { "video_bg",           OPT_TYPE_STRING, OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(video_background) }, "set video background for transparent videos" },
+    { "hwaccel",            OPT_TYPE_STRING, OPT_EXPERT | OPT_FLAG_OFFSET, { .off       = OFFSET(hwaccel) }, "use HW accelerated decoding" },
     { NULL, },
 };
 
@@ -4871,6 +4871,51 @@ void ffplay_player_set_loop(FFPlayer *player, int loop)
 {
     if (!player) return;
     player->params->loop = loop;
+}
+
+/**
+ * Parse ffplay command-line options and apply to player.
+ */
+int ffplay_player_parse_options(FFPlayer *player, int argc, const char **argv)
+{
+    if (!player || !player->params) return AVERROR(EINVAL);
+    if (argc <= 0 || !argv) return 0;
+
+    /* parse_options expects argv[0] to be the program name.
+     * We need to create a modified argv with a dummy program name.
+     */
+    const char **new_argv = av_mallocz((argc + 1) * sizeof(char *));
+    if (!new_argv) return AVERROR(ENOMEM);
+
+    new_argv[0] = "ffplay_player";  /* dummy program name */
+    for (int i = 0; i < argc; i++)
+        new_argv[i + 1] = argv[i];
+
+    /* Use parse_options with the global options array.
+     * Pass NULL for parse_arg_function since URL is set separately via ffplay_player_set_url.
+     */
+    int ret = parse_options(player->params, argc + 1, (char **)new_argv, options, NULL);
+
+    av_free(new_argv);
+    return ret;
+}
+
+/**
+ * Set a single ffplay option by name.
+ */
+int ffplay_player_set_option(FFPlayer *player, const char *name, const char *value)
+{
+    if (!player || !player->params) return AVERROR(EINVAL);
+    if (!name) return AVERROR(EINVAL);
+
+    /* parse_option expects option name without leading dash.
+     * If user passed with dash, skip it.
+     */
+    if (name[0] == '-')
+        name++;
+
+    /* Use parse_option with the global options array. */
+    return parse_option(player->params, name, value, options);
 }
 
 /**
