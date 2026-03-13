@@ -955,11 +955,56 @@ typedef struct FFmpegGlobalParam {
 typedef struct FFmpegTranscoder
 {
     FFmpegGlobalParam *global_param;
+    
+    /* Callbacks */
+    /**
+     * Progress callback function type.
+     * @param transcoder  The transcoder instance
+     * @param progress    Progress value (0.0 to 1.0), or -1.0 if unknown
+     * @param frame       Current frame number
+     * @param fps         Current frames per second
+     * @param time_ms     Current time in milliseconds
+     * @param bitrate     Current bitrate in kbits/s
+     * @param user_data   User-provided pointer
+     */
+    void (*progress_callback)(struct FFmpegTranscoder *transcoder, 
+                               double progress, int64_t frame, double fps,
+                               int64_t time_ms, double bitrate, void *user_data);
+    void *progress_user_data;
+    
+    /**
+     * Result callback function type.
+     * @param transcoder  The transcoder instance
+     * @param result      0 on success, negative error code on failure
+     * @param user_data   User-provided pointer
+     */
+    void (*result_callback)(struct FFmpegTranscoder *transcoder, int result, void *user_data);
+    void *result_user_data;
+    
+    /* Internal state */
+    int cancel_requested;       /* Set to 1 to cancel transcode */
+    int running;                /* 1 if transcode is running */
+    int last_result;            /* Result of last transcode operation */
 } FFmpegTranscoder;
 
 FFmpegTranscoder * ffmpeg_transcoder_init(void);
-void ffmpeg_transcoder_run(FFmpegTranscoder *transcoder,int argc, const char **argv);
-void ffmpeg_transcoder_deinit(FFmpegTranscoder *transcoder);
+void ffmpeg_transcoder_run(FFmpegTranscoder *transcoder, int argc, const char **argv);
+void ffmpeg_transcoder_cancel(FFmpegTranscoder *transcoder);
+void ffmpeg_transcoder_free(FFmpegTranscoder *transcoder);
+
+/* Callback registration */
+void ffmpeg_transcoder_set_progress_callback(FFmpegTranscoder *transcoder,
+    void (*callback)(FFmpegTranscoder *transcoder, double progress, int64_t frame,
+                     double fps, int64_t time_ms, double bitrate, void *user_data),
+    void *user_data);
+
+void ffmpeg_transcoder_set_result_callback(FFmpegTranscoder *transcoder,
+    void (*callback)(FFmpegTranscoder *transcoder, int result, void *user_data),
+    void *user_data);
+
+/* Status query */
+int ffmpeg_transcoder_is_running(FFmpegTranscoder *transcoder);
+int ffmpeg_transcoder_get_result(FFmpegTranscoder *transcoder);
 
 extern const OptionDef options[];
 

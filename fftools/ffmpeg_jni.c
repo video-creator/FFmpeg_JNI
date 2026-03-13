@@ -1000,7 +1000,7 @@ static void init_global_param_val(FFmpegGlobalParam*g) {
     g->copy_unknown_streams = 0;
     g->recast_media = 0;
 }
-FFmpegTranscoder * ffmpeg_transcoder_init() {
+FFmpegTranscoder * ffmpeg_transcoder_init(void) {
     FFmpegTranscoder *transcoder = av_mallocz(sizeof(FFmpegTranscoder));
     if (!transcoder)
         return NULL;
@@ -1016,17 +1016,262 @@ FFmpegTranscoder * ffmpeg_transcoder_init() {
         return NULL;
     }   
     init_global_param_val(transcoder->global_param);
+    transcoder->progress_callback = NULL;
+    transcoder->progress_user_data = NULL;
+    transcoder->result_callback = NULL;
+    transcoder->result_user_data = NULL;
+    transcoder->cancel_requested = 0;
+    transcoder->running = 0;
+    transcoder->last_result = 0;
     return transcoder;
 }
-void ffmpeg_transcoder_run(FFmpegTranscoder *transcoder,int argc, const char **argv) {
 
+void ffmpeg_transcoder_set_progress_callback(FFmpegTranscoder *transcoder,
+    void (*callback)(FFmpegTranscoder *transcoder, double progress, int64_t frame,
+                     double fps, int64_t time_ms, double bitrate, void *user_data),
+    void *user_data)
+{
+    if (!transcoder) return;
+    transcoder->progress_callback = callback;
+    transcoder->progress_user_data = user_data;
 }
-void ffmpeg_transcoder_deinit(FFmpegTranscoder *transcoder) {
-    if (transcoder) {
-        if (transcoder->global_param) {
-            av_free(transcoder->global_param);
+
+void ffmpeg_transcoder_set_result_callback(FFmpegTranscoder *transcoder,
+    void (*callback)(FFmpegTranscoder *transcoder, int result, void *user_data),
+    void *user_data)
+{
+    if (!transcoder) return;
+    transcoder->result_callback = callback;
+    transcoder->result_user_data = user_data;
+}
+
+int ffmpeg_transcoder_is_running(FFmpegTranscoder *transcoder)
+{
+    return transcoder ? transcoder->running : 0;
+}
+
+int ffmpeg_transcoder_get_result(FFmpegTranscoder *transcoder)
+{
+    return transcoder ? transcoder->last_result : AVERROR(EINVAL);
+}
+
+void ffmpeg_transcoder_cancel(FFmpegTranscoder *transcoder) {
+    if (!transcoder) return;
+    transcoder->cancel_requested = 1;
+    /* Signal the decode interrupt callback to stop */
+    received_nb_signals++;
+}
+
+void ffmpeg_transcoder_free(FFmpegTranscoder *transcoder) {
+    if (!transcoder) return;
+    if (transcoder->global_param) {
+        if (transcoder->global_param->all_params) {
+            av_free(transcoder->global_param->all_params);
         }
-        av_free(transcoder);
+        av_free(transcoder->global_param);
+    }
+    av_free(transcoder);
+}
+
+/* Internal function to check if transcode should be cancelled */
+static int transcoder_check_cancel(void *ctx)
+{
+    FFmpegTranscoder *transcoder = (FFmpegTranscoder *)ctx;
+    return transcoder ? transcoder->cancel_requested : 0;
+}
+
+/* Modified print_report to call progress callback */
+static void print_report_with_callback(int is_last_report, int64_t timer_start, int64_t cur_time, int64_t pts, FFmpegTranscoder *transcoder)
+{
+    FFmpegGlobalParam *g = transcoder->global_param;
+    
+    /* Call original print_report for console output */
+    print_report(is_last_report, timer_start, cur_time, pts, transcoder);
+    
+    /* Call progress callback if registered */
+    if (transcoder->progress_callback && !is_last_report) {
+        double progress = -1.0;
+        int64_t frame = 0;
+        double fps = 0.0;
+        int64_t time_ms = 0;
+        double bitrate = -1.0;
+        double t;
+        
+        t = (cur_time - timer_start) / 1000000.0;
+        
+        /* Get frame count and fps from first video stream */
+        for (OutputStream *ost = ost_iter(NULL, transcoder); ost; ost = ost_iter(ost, transcoder)) {
+            if (ost->type == AVMEDIA_TYPE_VIDEO) {
+                frame = atomic_load(&ost->packets_written);
+                fps = t > 1 ? frame / t : 0;
+                break;
+            }
+        }
+        
+        /* Calculate time in milliseconds */
+        if (pts != AV_NOPTS_VALUE) {
+            time_ms = pts / 1000;
+        }
+        
+        /* Calculate bitrate */
+        int64_t total_size = of_filesize(g->output_files[0]);
+        if (pts != AV_NOPTS_VALUE && pts && total_size >= 0) {
+            bitrate = total_size * 8 / (pts / 1000.0);
+        }
+        
+        /* Calculate progress if duration is known */
+        if (g->nb_input_files > 0 && g->input_files[0] && g->input_files[0]->ctx) {
+            int64_t duration = g->input_files[0]->ctx->duration;
+            if (duration > 0 && pts != AV_NOPTS_VALUE) {
+                progress = (double)pts / (double)duration;
+                if (progress > 1.0) progress = 1.0;
+                if (progress < 0.0) progress = 0.0;
+            }
+        }
+        
+        transcoder->progress_callback(transcoder, progress, frame, fps, time_ms, bitrate, 
+                                       transcoder->progress_user_data);
+    }
+}
+
+void ffmpeg_transcoder_run(FFmpegTranscoder *transcoder, int argc, const char **argv) {
+    Scheduler *sch = NULL;
+    int ret;
+    BenchmarkTimeStamps ti;
+
+    if (!transcoder || !transcoder->global_param) {
+        ret = AVERROR(EINVAL);
+        goto finish;
+    }
+    
+    /* Reset state */
+    transcoder->cancel_requested = 0;
+    transcoder->running = 1;
+    transcoder->last_result = 0;
+    received_nb_signals = 0;
+    atomic_store(&transcode_init_done, 0);
+
+    init_dynload();
+    setvbuf(stderr, NULL, _IONBF, 0);
+    av_log_set_flags(AV_LOG_SKIP_REPEATED);
+    parse_loglevel(argc, argv, options, transcoder);
+
+#if CONFIG_AVDEVICE
+    avdevice_register_all();
+#endif
+    avformat_network_init();
+
+    show_banner(argc, argv, options, transcoder);
+
+    sch = sch_alloc();
+    if (!sch) {
+        ret = AVERROR(ENOMEM);
+        goto finish;
+    }
+
+    /* parse options and open all input/output files */
+    ret = ffmpeg_parse_options(argc, argv, sch, transcoder);
+    if (ret < 0)
+        goto finish;
+
+    if (transcoder->global_param->nb_output_files <= 0 && transcoder->global_param->nb_input_files == 0) {
+        show_usage();
+        av_log(NULL, AV_LOG_WARNING, "Use -h to get full help or, even better, run 'man %s'\n", program_name);
+        ret = 1;
+        goto finish;
+    }
+
+    if (transcoder->global_param->nb_output_files <= 0) {
+        av_log(NULL, AV_LOG_FATAL, "At least one output file must be specified\n");
+        ret = 1;
+        goto finish;
+    }
+
+#if CONFIG_MEDIACODEC
+    android_binder_threadpool_init_if_required();
+#endif
+
+    transcoder->global_param->current_time = ti = get_benchmark_time_stamps();
+    
+    /* Run transcode with progress callback support */
+    {
+        int64_t timer_start, transcode_ts = 0;
+        FFmpegGlobalParam *g = transcoder->global_param;
+        
+        print_stream_maps(transcoder);
+        atomic_store(&transcode_init_done, 1);
+
+        ret = sch_start(sch);
+        if (ret < 0)
+            goto transcode_finish;
+
+        if (g->stdin_interaction) {
+            av_log(NULL, AV_LOG_INFO, "Press [q] to stop, [?] for help\n");
+        }
+
+        timer_start = av_gettime_relative();
+
+        while (!sch_wait(sch, g->stats_period, &transcode_ts)) {
+            int64_t cur_time = av_gettime_relative();
+
+            /* Check for cancel request */
+            if (transcoder->cancel_requested || received_nb_signals)
+                break;
+
+            /* if 'q' pressed, exits */
+            if (g->stdin_interaction)
+                if (check_keyboard_interaction(cur_time, transcoder) < 0)
+                    break;
+
+            /* dump report with callback */
+            print_report_with_callback(0, timer_start, cur_time, transcode_ts, transcoder);
+        }
+
+        ret = sch_stop(sch, &transcode_ts);
+
+        /* write the trailer if needed */
+        for (int i = 0; i < g->nb_output_files; i++) {
+            int err = of_write_trailer(g->output_files[i]);
+            ret = err_merge(ret, err);
+        }
+
+        term_exit();
+
+        /* dump final report */
+        print_report_with_callback(1, timer_start, av_gettime_relative(), transcode_ts, transcoder);
+    }
+    
+    if (ret >= 0 && transcoder->global_param->do_benchmark) {
+        int64_t utime, stime, rtime;
+        transcoder->global_param->current_time = get_benchmark_time_stamps();
+        utime = transcoder->global_param->current_time.user_usec - ti.user_usec;
+        stime = transcoder->global_param->current_time.sys_usec  - ti.sys_usec;
+        rtime = transcoder->global_param->current_time.real_usec - ti.real_usec;
+        av_log(NULL, AV_LOG_INFO,
+               "bench: utime=%0.3fs stime=%0.3fs rtime=%0.3fs\n",
+               utime / 1000000.0, stime / 1000000.0, rtime / 1000000.0);
+    }
+
+    ret = received_nb_signals                 ? 255 :
+          (ret == FFMPEG_ERROR_RATE_EXCEEDED) ?  69 : ret;
+
+transcode_finish:
+    if (ret == AVERROR_EXIT)
+        ret = 0;
+    
+    ffmpeg_cleanup(ret, transcoder);
+    sch_free(&sch);
+    
+    av_log(NULL, AV_LOG_VERBOSE, "\n");
+    av_log(NULL, AV_LOG_VERBOSE, "Exiting with exit code %d\n", ret);
+
+finish:
+    transcoder->running = 0;
+    transcoder->last_result = ret;
+    
+    /* Call result callback if registered */
+    if (transcoder && transcoder->result_callback) {
+        transcoder->result_callback(transcoder, ret, transcoder->result_user_data);
     }
 }
 int ffmpeg(int argc, const char **argv) {
