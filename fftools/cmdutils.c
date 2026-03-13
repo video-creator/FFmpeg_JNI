@@ -598,10 +598,8 @@ static const AVOption *opt_find(void *obj, const char *name, const char *unit,
 #define FLAGS ((o->type == AV_OPT_TYPE_FLAGS && (arg[0]=='-' || arg[0]=='+')) ? AV_DICT_APPEND : 0)
 int opt_default(void *optctx, const char *opt, const char *arg)
 {
-    OptionsContext *oo = (OptionsContext *)optctx;
-    FFGlobalParam *global_param = NULL;
-    if (oo->transcoder) 
-        global_param = oo->transcoder->global_param->all_params;
+    OptionParseContext *oo = (OptionParseContext *)optctx;
+    FFGlobalParam *global_param = oo->global_param;
     const AVOption *o;
     int consumed = 0;
     char opt_stripped[128];
@@ -875,7 +873,7 @@ do {                                                                           \
 
         /* AVOptions */
         if (argv[optindex]) {
-            ret = opt_default(NULL, opt, argv[optindex]);
+            ret = opt_default(octx, opt, argv[optindex]);
             if (ret >= 0) {
                 av_log(NULL, AV_LOG_DEBUG, " matched as AVOption '%s' with "
                        "argument '%s'.\n", opt, argv[optindex]);

@@ -296,7 +296,7 @@ static void ffmpeg_cleanup(int ret, FFmpegTranscoder *transcoder)
 {
     FFmpegGlobalParam *g = transcoder->global_param;
     if ((g->print_graphs || g->print_graphs_file) && g->nb_output_files > 0)
-        print_filtergraphs(g->filtergraphs, g->nb_filtergraphs, g->input_files, g->nb_input_files, g->output_files, g->nb_output_files,g);
+        print_filtergraphs(g->filtergraphs, g->nb_filtergraphs, g->input_files, g->nb_input_files, g->output_files, g->nb_output_files,transcoder);
 
     if (g->do_benchmark) {
         int64_t maxrss = getmaxrss() / 1024;
@@ -326,7 +326,7 @@ static void ffmpeg_cleanup(int ret, FFmpegTranscoder *transcoder)
     av_freep(&g->vstats_filename);
     of_enc_stats_close();
 
-    hw_device_free_all(g);
+    hw_device_free_all(transcoder);
 
     av_freep(&g->filter_nbthreads);
 
@@ -336,7 +336,7 @@ static void ffmpeg_cleanup(int ret, FFmpegTranscoder *transcoder)
     av_freep(&g->input_files);
     av_freep(&g->output_files);
 
-    uninit_opts(g);
+    uninit_opts(g->all_params);
 
     avformat_network_deinit();
 
@@ -590,7 +590,7 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
     av_bprint_init(&buf, 0, AV_BPRINT_SIZE_AUTOMATIC);
     av_bprint_init(&buf_script, 0, AV_BPRINT_SIZE_AUTOMATIC);
 
-    for (OutputStream *ost = ost_iter(NULL,g); ost; ost = ost_iter(ost,g)) {
+    for (OutputStream *ost = ost_iter(NULL,transcoder); ost; ost = ost_iter(ost,transcoder)) {
         const float q = ost->enc ? atomic_load(&ost->quality) / (float) FF_QP2LAMBDA : -1;
 
         if (vid && ost->type == AVMEDIA_TYPE_VIDEO) {
@@ -721,7 +721,7 @@ static void print_stream_maps(FFmpegTranscoder *transcoder)
 {
     FFmpegGlobalParam *g = transcoder->global_param;
     av_log(NULL, AV_LOG_INFO, "Stream mapping:\n");
-    for (InputStream *ist = ist_iter(NULL,g); ist; ist = ist_iter(ist,g)) {
+    for (InputStream *ist = ist_iter(NULL,transcoder); ist; ist = ist_iter(ist,transcoder)) {
         for (int j = 0; j < ist->nb_filters; j++) {
             if (!filtergraph_is_simple(ist->filters[j]->graph)) {
                 av_log(NULL, AV_LOG_INFO, "  Stream #%d:%d (%s) -> %s",
@@ -734,7 +734,7 @@ static void print_stream_maps(FFmpegTranscoder *transcoder)
         }
     }
 
-    for (OutputStream *ost = ost_iter(NULL,g); ost; ost = ost_iter(ost,g)) {
+    for (OutputStream *ost = ost_iter(NULL,transcoder); ost; ost = ost_iter(ost,transcoder)) {
         if (ost->attachment_filename) {
             /* an attached file */
             av_log(NULL, AV_LOG_INFO, "  File %s -> Stream #%d:%d\n",
@@ -840,7 +840,7 @@ static int check_keyboard_interaction(int64_t cur_time,FFmpegTranscoder *transco
             (n = sscanf(buf, "%63[^ ] %lf %255[^ ] %255[^\n]", target, &time, command, arg)) >= 3) {
             av_log(NULL, AV_LOG_DEBUG, "Processing command target:%s time:%f command:%s arg:%s",
                    target, time, command, arg);
-            for (OutputStream *ost = ost_iter(NULL,g); ost; ost = ost_iter(ost,g)) {
+            for (OutputStream *ost = ost_iter(NULL,transcoder); ost; ost = ost_iter(ost,transcoder)) {
                 if (ost->fg_simple)
                     fg_send_command(ost->fg_simple, time, target, command, arg,
                                     key == 'C');
@@ -877,7 +877,7 @@ static int transcode(Scheduler *sch,FFmpegTranscoder *transcoder)
     int ret = 0;
     int64_t timer_start, transcode_ts = 0;
     FFmpegGlobalParam *g = transcoder->global_param;
-    print_stream_maps(g);
+    print_stream_maps(transcoder);
 
     atomic_store(&transcode_init_done, 1);
 
@@ -899,11 +899,11 @@ static int transcode(Scheduler *sch,FFmpegTranscoder *transcoder)
 
         /* if 'q' pressed, exits */
         if (g->stdin_interaction)
-            if (check_keyboard_interaction(cur_time,g) < 0)
+            if (check_keyboard_interaction(cur_time,transcoder) < 0)
                 break;
 
         /* dump report by using the output first video and audio streams */
-        print_report(0, timer_start, cur_time, transcode_ts,g);
+        print_report(0, timer_start, cur_time, transcode_ts,transcoder);
     }
 
     ret = sch_stop(sch, &transcode_ts);
@@ -917,7 +917,7 @@ static int transcode(Scheduler *sch,FFmpegTranscoder *transcoder)
     term_exit();
 
     /* dump report by using the first video and audio streams */
-    print_report(1, timer_start, av_gettime_relative(), transcode_ts,g);
+    print_report(1, timer_start, av_gettime_relative(), transcode_ts,transcoder);
 
     return ret;
 }
@@ -1004,11 +1004,17 @@ FFmpegTranscoder * ffmpeg_transcoder_init() {
     FFmpegTranscoder *transcoder = av_mallocz(sizeof(FFmpegTranscoder));
     if (!transcoder)
         return NULL;
-    transcoder->global_param = av_mallocz(sizeof(FFmpegTranscoder));
+    transcoder->global_param = av_mallocz(sizeof(FFmpegGlobalParam));
     if (!transcoder->global_param) {
         av_free(transcoder);
         return NULL;
     }
+    transcoder->global_param->all_params = av_mallocz(sizeof(FFGlobalParam));
+    if (!transcoder->global_param->all_params) {
+        av_free(transcoder->global_param);
+        av_free(transcoder);
+        return NULL;
+    }   
     init_global_param_val(transcoder->global_param);
     return transcoder;
 }
@@ -1072,7 +1078,7 @@ int ffmpeg(int argc, const char **argv) {
 #endif
 
     transcoder->global_param->current_time = ti = get_benchmark_time_stamps();
-    ret = transcode(sch,transcode);
+    ret = transcode(sch,transcoder);
     if (ret >= 0 && transcoder->global_param->do_benchmark) {
         int64_t utime, stime, rtime;
         transcoder->global_param->current_time = get_benchmark_time_stamps();

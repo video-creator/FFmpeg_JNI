@@ -101,7 +101,7 @@ static int choose_encoder(const OptionsContext *o, AVFormatContext *s,
             return AVERROR_ENCODER_NOT_FOUND;
         }
     } else if (strcmp(codec_name, "copy")) {
-        int ret = find_codec(ost, codec_name, ost->type, 1, enc, o->transcoder->global_param);
+        int ret = find_codec(ost, codec_name, ost->type, 1, enc, o->transcoder);
         if (ret < 0)
             return ret;
         ms->par_in->codec_id = (*enc)->id;
@@ -776,7 +776,7 @@ static int new_stream_video(Muxer *mux, const OptionsContext *o,
 #endif
         opt_match_per_stream_str(ost, &o->fps_mode, oc, st, &fps_mode);
         if (fps_mode) {
-            ret = parse_and_set_vsync(fps_mode, vsync_method, ost->file->index, ost->index, 0, mux->transcoder->global_param);
+            ret = parse_and_set_vsync(fps_mode, vsync_method, ost->file->index, ost->index, 0, mux->transcoder);
             if (ret < 0)
                 return ret;
         }
@@ -1010,7 +1010,7 @@ ost_bind_filter(const Muxer *mux, MuxStream *ms, OutputFilter *ofilter,
         ret = ofilter_bind_enc(ofilter, ms->sch_idx_enc, &opts);
     } else {
         ret = fg_create_simple(&ost->fg_simple, ost->ist, &filters,
-                               mux->sch, ms->sch_idx_enc, &opts, mux->transcoder->global_param);
+                               mux->sch, ms->sch_idx_enc, &opts, mux->transcoder);
         if (ret >= 0)
             ost->filter = ost->fg_simple->outputs[0];
 
@@ -1274,7 +1274,7 @@ static int ost_add(Muxer *mux, const OptionsContext *o, enum AVMediaType type,
             return ret;
         ms->sch_idx_enc = ret;
 
-        ret = enc_alloc(&ost->enc, enc, mux->sch, ms->sch_idx_enc, ost, mux->transcoder->global_param);
+        ret = enc_alloc(&ost->enc, enc, mux->sch, ms->sch_idx_enc, ost, mux->transcoder);
         if (ret < 0)
             return ret;
 
@@ -1323,7 +1323,7 @@ static int ost_add(Muxer *mux, const OptionsContext *o, enum AVMediaType type,
 
         opt_match_per_stream_str(ost, &o->presets, oc, st, &preset);
         opt_match_per_stream_int(ost, &o->autoscale, oc, st, &autoscale);
-        if (preset && (!(ret = get_preset_file_2(preset, enc->name, &s, mux->transcoder->global_param)))) {
+        if (preset && (!(ret = get_preset_file_2(preset, enc->name, &s, mux->transcoder)))) {
             AVBPrint bprint;
             av_bprint_init(&bprint, 0, AV_BPRINT_SIZE_UNLIMITED);
             do  {
@@ -1360,7 +1360,7 @@ static int ost_add(Muxer *mux, const OptionsContext *o, enum AVMediaType type,
 
             opt_match_per_stream_str(ost, &o->enc_stats_pre_fmt, oc, st, &format);
 
-            ret = enc_stats_init(ost, &ost->enc_stats_pre, 1, enc_stats_pre, format,mux->transcoder->global_param);
+            ret = enc_stats_init(ost, &ost->enc_stats_pre, 1, enc_stats_pre, format,mux->transcoder);
             if (ret < 0)
                 goto fail;
         }
@@ -1372,7 +1372,7 @@ static int ost_add(Muxer *mux, const OptionsContext *o, enum AVMediaType type,
 
             opt_match_per_stream_str(ost, &o->enc_stats_post_fmt, oc, st, &format);
 
-            ret = enc_stats_init(ost, &ost->enc_stats_post, 0, enc_stats_post, format,mux->transcoder->global_param);
+            ret = enc_stats_init(ost, &ost->enc_stats_post, 0, enc_stats_post, format,mux->transcoder);
             if (ret < 0)
                 goto fail;
         }
@@ -1384,7 +1384,7 @@ static int ost_add(Muxer *mux, const OptionsContext *o, enum AVMediaType type,
 
             opt_match_per_stream_str(ost, &o->mux_stats_fmt, oc, st, &format);
 
-            ret = enc_stats_init(ost, &ms->stats, 0, mux_stats, format,mux->transcoder->global_param);
+            ret = enc_stats_init(ost, &ms->stats, 0, mux_stats, format,mux->transcoder);
             if (ret < 0)
                 goto fail;
         }
@@ -1761,7 +1761,7 @@ static int map_auto_subtitle(Muxer *mux, const OptionsContext *o)
     if (!avcodec_find_encoder(oc->oformat->subtitle_codec) && !subtitle_codec_name)
         return 0;
 
-    for (InputStream *ist = ist_iter(NULL,mux->transcoder->global_param); ist; ist = ist_iter(ist, mux->transcoder->global_param))
+    for (InputStream *ist = ist_iter(NULL,mux->transcoder); ist; ist = ist_iter(ist, mux->transcoder))
         if (ist->st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
             AVCodecDescriptor const *input_descriptor =
                 avcodec_descriptor_get(ist->st->codecpar->codec_id);
@@ -1799,7 +1799,7 @@ static int map_auto_data(Muxer *mux, const OptionsContext *o)
     if (codec_id == AV_CODEC_ID_NONE)
         return 0;
 
-    for (InputStream *ist = ist_iter(NULL, mux->transcoder->global_param); ist; ist = ist_iter(ist, mux->transcoder->global_param)) {
+    for (InputStream *ist = ist_iter(NULL, mux->transcoder); ist; ist = ist_iter(ist, mux->transcoder)) {
         if (ist->user_set_discard == AVDISCARD_ALL)
             continue;
         if (ist->st->codecpar->codec_type == AVMEDIA_TYPE_DATA &&
@@ -3420,7 +3420,7 @@ int of_open(const OptionsContext *o, const char *filename, Scheduler *sch)
 
     if (!(oc->oformat->flags & AVFMT_NOFILE)) {
         /* test if it already exists to avoid losing precious files */
-        err = assert_file_overwrite(filename,o->transcoder->global_param);
+        err = assert_file_overwrite(filename,o->transcoder);
         if (err < 0)
             return err;
 
@@ -3433,7 +3433,7 @@ int of_open(const OptionsContext *o, const char *filename, Scheduler *sch)
             return err;
         }
     } else if (strcmp(oc->oformat->name, "image2")==0 && !av_filename_number_test(filename)) {
-        err = assert_file_overwrite(filename,o->transcoder->global_param);
+        err = assert_file_overwrite(filename,o->transcoder);
         if (err < 0)
             return err;
     }

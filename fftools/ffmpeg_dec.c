@@ -752,9 +752,9 @@ static int packet_decode(DecoderPriv *dp, AVPacket *pkt, AVFrame *frame)
 
         av_frame_unref(frame);
 
-        update_benchmark(dp->transcoder->global_param, NULL);
+        update_benchmark(dp->transcoder, NULL);
         ret = avcodec_receive_frame_flags(dec, frame, flags);
-        update_benchmark(dp->transcoder->global_param,"decode_%s %s", type_desc, dp->parent_name);
+        update_benchmark(dp->transcoder,"decode_%s %s", type_desc, dp->parent_name);
 
         if (ret == AVERROR(EAGAIN)) {
             av_assert0(pkt); // should never happen during flushing
@@ -1446,12 +1446,12 @@ static int hw_device_setup_for_decode(DecoderPriv *dp,
             // call hw_device_get_by_name("__qsv_device") to select the internal QSV
             // device.
             if (!dev && type == AV_HWDEVICE_TYPE_QSV)
-                dev = hw_device_get_by_name("__qsv_device", dp->transcoder->global_param);
+                dev = hw_device_get_by_name("__qsv_device", dp->transcoder);
 
             if (!dev)
-                err = hw_device_init_from_type(type, NULL, &dev, dp->transcoder->global_param);
+                err = hw_device_init_from_type(type, NULL, &dev, dp->transcoder);
         } else {
-            dev = hw_device_match_by_codec(codec, dp->transcoder->global_param);
+            dev = hw_device_match_by_codec(codec, dp->transcoder);
             if (!dev) {
                 // No device for this codec, but not using generic hwaccel
                 // and therefore may well not need one - ignore.
@@ -1470,7 +1470,7 @@ static int hw_device_setup_for_decode(DecoderPriv *dp,
             if (!config)
                 break;
             type = config->device_type;
-            dev = hw_device_get_by_type(type, dp->transcoder->global_param);
+            dev = hw_device_get_by_type(type, dp->transcoder);
             if (dev) {
                 av_log(dp, AV_LOG_INFO, "Using auto "
                        "hwaccel type %s with existing device %s.\n",
@@ -1484,7 +1484,7 @@ static int hw_device_setup_for_decode(DecoderPriv *dp,
             type = config->device_type;
             // Try to make a new device of this type.
             err = hw_device_init_from_type(type, hwaccel_device,
-                                           &dev, dp->transcoder->global_param);
+                                           &dev, dp->transcoder);
             if (err < 0) {
                 // Can't make a device of this type.
                 continue;
@@ -1657,7 +1657,7 @@ static int dec_open(DecoderPriv *dp, AVDictionary **dec_opts,
 
 int dec_init(Decoder **pdec, Scheduler *sch,
              AVDictionary **dec_opts, const DecoderOpts *o,
-             AVFrame *param_out, FFmpegTranscoder *global_param)
+             AVFrame *param_out, FFmpegTranscoder *transcoder)
 {
     DecoderPriv *dp;
     int ret;
@@ -1669,7 +1669,7 @@ int dec_init(Decoder **pdec, Scheduler *sch,
         return ret;
 
     multiview_check_manual(dp, *dec_opts);
-    dp->transcoder->global_param = global_param;
+    dp->transcoder = transcoder;
     ret = dec_open(dp, dec_opts, o, param_out);
     if (ret < 0)
         goto fail;

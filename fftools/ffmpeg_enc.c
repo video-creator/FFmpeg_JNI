@@ -165,7 +165,7 @@ static int hw_device_setup_for_encode(Encoder *e, AVCodecContext *enc_ctx,
 
         if (!dev &&
             config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)
-            dev = hw_device_get_by_type(config->device_type, e->transcoder->global_param);
+            dev = hw_device_get_by_type(config->device_type, e->transcoder);
     }
 
     if (dev) {
@@ -645,7 +645,7 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame,
             enc->sample_aspect_ratio = frame->sample_aspect_ratio;
     }
 
-    update_benchmark(e->transcoder->global_param, NULL);
+    update_benchmark(e->transcoder, NULL);
 
     ret = avcodec_send_frame(enc, frame);
     if (ret < 0 && !(ret == AVERROR_EOF && !frame)) {
@@ -660,7 +660,7 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame,
         av_packet_unref(pkt);
 
         ret = avcodec_receive_packet(enc, pkt);
-        update_benchmark(e->transcoder->global_param,"%s_%s %d.%d", action, type_desc,
+        update_benchmark(e->transcoder,"%s_%s %d.%d", action, type_desc,
                          of->index, ost->index);
 
         pkt->time_base = enc->time_base;
